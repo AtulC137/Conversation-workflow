@@ -1,0 +1,14 @@
+version: '3.9'
+
+services:
+  lovable-app:
+    build: .
+    container_name: lovable-flow-ai
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
