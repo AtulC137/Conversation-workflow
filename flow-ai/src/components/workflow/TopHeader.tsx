@@ -5,7 +5,6 @@ import {
   ZoomOut,
   Maximize2,
   Play,
-  Save,
   Rocket,
   ChevronDown,
   Phone,
@@ -17,11 +16,15 @@ import type { WorkflowTools } from "./types";
 
 type Props = {
   title: string;
+  status?: string;
   canEdit?: boolean;
   tools: WorkflowTools;
   hasContext: boolean;
+  saving?: boolean;
   onTitleChange: (v: string) => void;
   onTest: () => void;
+  onPublish: () => void;
+  onLogout: () => void;
   onOpenContext: () => void;
   onToggleTool: (tool: "voice" | "whatsapp") => void;
   onConfigureTool: (tool: "whatsapp") => void;
@@ -29,11 +32,15 @@ type Props = {
 
 export function TopHeader({
   title,
+  status = "draft",
   canEdit = true,
   tools,
   hasContext,
+  saving = false,
   onTitleChange,
   onTest,
+  onPublish,
+  onLogout,
   onOpenContext,
   onToggleTool,
   onConfigureTool,
@@ -63,8 +70,8 @@ export function TopHeader({
             {title}
           </button>
         )}
-        <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-          Draft
+        <span className="rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] font-medium capitalize text-muted-foreground">
+          {status}
         </span>
       </div>
 
@@ -74,7 +81,7 @@ export function TopHeader({
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
           <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
         </span>
-        <span className="text-xs text-muted-foreground">Auto-saved</span>
+        <span className="text-xs text-muted-foreground">{saving ? "Saving…" : "Saved"}</span>
       </div>
 
       <div className="flex-1" />
@@ -125,12 +132,18 @@ export function TopHeader({
       >
         <Play className="h-3.5 w-3.5" /> Test Workflow
       </button>
-      <button className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-foreground/30 hover:shadow-sm">
-        <Save className="h-3.5 w-3.5" /> Save
-      </button>
-      <button className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background transition hover:opacity-90">
-        <Rocket className="h-3.5 w-3.5" /> Deploy
+      <button
+        onClick={onPublish}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background transition hover:opacity-90"
+      >
+        <Rocket className="h-3.5 w-3.5" /> Publish
         <ChevronDown className="h-3 w-3 opacity-70" />
+      </button>
+      <button
+        onClick={onLogout}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-muted-foreground transition hover:text-foreground"
+      >
+        Log out
       </button>
     </header>
   );

@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { X, Plus, Trash2 } from "lucide-react";
 import type { Node } from "reactflow";
-import type { NodeData } from "./types";
+import { DEFAULT_SILENCE_TIMEOUT_SEC, type NodeData } from "./types";
 
 type Props = {
   node: Node<NodeData>;
@@ -242,18 +242,20 @@ function SilenceTimeoutField({
         min={1}
         max={30}
         step={1}
-        value={data.silenceTimeoutSec ?? 4}
+        value={data.silenceTimeoutSec ?? DEFAULT_SILENCE_TIMEOUT_SEC}
         onChange={(e) => {
           const parsed = Number.parseInt(e.target.value, 10);
           onChange({
             ...data,
-            silenceTimeoutSec: Number.isFinite(parsed) && parsed > 0 ? parsed : 4,
+            silenceTimeoutSec:
+              Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SILENCE_TIMEOUT_SEC,
           });
         }}
         className="input"
       />
       <p className="mt-1 text-[11px] text-muted-foreground">
-        If the caller says nothing after AI finishes, follow the No response wire.
+        If the caller says nothing after AI finishes, follow the No response wire (or ai-out if
+        none).
       </p>
     </Field>
   );

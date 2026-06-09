@@ -174,7 +174,7 @@ def _normalize_transcript(transcript: str) -> str:
 
 
 _FILLER_ONLY = re.compile(
-    r"^(?:umm+|uh+|hmm+|hm+|ah+|er+|mm+|a+h+|u+h+)$",
+    r"^(?:umm+|uhh*|uh+|hmm+|hm+|ahh*|ah+|er+|mm+|a+h+|u+h+)$",
     re.I,
 )
 
@@ -235,6 +235,35 @@ def looks_like_negative(transcript: str) -> bool:
     return bool(_NEGATIVE_ONLY.match(text))
 
 
+def looks_like_noise(transcript: str) -> bool:
+    stripped = transcript.strip()
+    if not stripped:
+        return True
+    if looks_like_filler(stripped):
+        return True
+    if re.match(r"^[\W_]+$", stripped, re.UNICODE):
+        return True
+
+    text = _normalize_transcript(stripped)
+    if not text:
+        core = re.sub(r"[^\w]", "", stripped, flags=re.UNICODE)
+        if core and len(core) <= 2:
+            if not looks_like_acknowledgment(stripped) and not looks_like_negative(stripped):
+                return True
+        return len(stripped) <= 3
+
+    if looks_like_acknowledgment(stripped) or looks_like_negative(stripped):
+        return False
+
+    words = text.split()
+    if len(words) == 1 and len(words[0]) <= 2:
+        if re.match(r"^[a-z]{1,2}$", words[0], re.I):
+            return True
+        if re.search(r"[^\x00-\x7F]", words[0]):
+            return True
+    return False
+
+
 def find_continue_branch(branches: list[dict]) -> str | None:
     for branch in branches:
         bid = (branch.get("id") or "").strip()
@@ -262,7 +291,12 @@ def _looks_like_off_script(transcript: str) -> bool:
     text = transcript.strip()
     if not text:
         return False
-    if looks_like_farewell(text) or looks_like_filler(text) or looks_like_acknowledgment(text):
+    if (
+        looks_like_farewell(text)
+        or looks_like_filler(text)
+        or looks_like_noise(text)
+        or looks_like_acknowledgment(text)
+    ):
         return False
     if "?" in text:
         return True
@@ -312,6 +346,10 @@ async def classify_branch(
         logger.info(f"[CLASSIFY] filler pre-check → null for {transcript!r}")
         return None
 
+    if looks_like_noise(transcript):
+        logger.info(f"[CLASSIFY] noise pre-check → null for {transcript!r}")
+        return None
+
     valid_ids = {b["id"] for b in branches}
     branch_lines = []
     for b in branches:
@@ -327,8 +365,11 @@ async def classify_branch(
         "Return {\"branchId\": null, \"confidence\": \"high\"} when the user:\n"
         "- Asks a question (amount, date, details, clarification)\n"
         "- Changes topic without picking a branch\n"
-        "- Gives a partial or ambiguous reply\n\n"
+        "- Gives a partial or ambiguous reply\n"
+        "- Makes unclear vocalizations (ah, uh, single syllables, one-letter sounds)\n\n"
         "Do NOT match because the user mentions a word that appears in a branch label.\n"
+        "Single-syllable vocalizations or unclear sounds → {\"branchId\": null, \"confidence\": \"high\"}.\n"
+        "Only match no-questions when the user clearly says no / nothing / that's all.\n"
         "Bare acknowledgments with NO commitment intent (okay, ok, alright, got it, understood) "
         "→ match the continue branch if one exists, NOT pay/yes branches.\n"
         "Payment or yes branches require explicit commitment "

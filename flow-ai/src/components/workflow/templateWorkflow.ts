@@ -1,7 +1,7 @@
 import { MarkerType, type Edge, type Node } from "reactflow";
 
 import type { NodeData } from "./types";
-import { NO_RESPONSE_HANDLE } from "./types";
+import { DEFAULT_SILENCE_TIMEOUT_SEC, NO_RESPONSE_HANDLE } from "./types";
 
 
 
@@ -57,7 +57,7 @@ export function createLoanReminderTemplate(): {
 
       type: "start",
 
-      position: { x: 80, y: 220 },
+      position: { x: 80, y: 380 },
 
       data: { title: "Start" },
 
@@ -69,7 +69,7 @@ export function createLoanReminderTemplate(): {
 
       type: "conversation",
 
-      position: { x: 280, y: 220 },
+      position: { x: 500, y: 380 },
 
       data: {
 
@@ -131,7 +131,7 @@ export function createLoanReminderTemplate(): {
 
       type: "conversation",
 
-      position: { x: 560, y: 80 },
+      position: { x: 920, y: 280 },
 
       data: {
 
@@ -187,7 +187,7 @@ export function createLoanReminderTemplate(): {
 
       type: "userInput",
 
-      position: { x: 840, y: 80 },
+      position: { x: 1380, y: 280 },
 
       data: {
 
@@ -211,7 +211,7 @@ export function createLoanReminderTemplate(): {
 
       type: "qa",
 
-      position: { x: 1100, y: 80 },
+      position: { x: 1840, y: 280 },
 
       data: {
 
@@ -235,7 +235,7 @@ export function createLoanReminderTemplate(): {
 
         notes: "",
 
-        silenceTimeoutSec: 4,
+        silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
 
       },
 
@@ -247,7 +247,7 @@ export function createLoanReminderTemplate(): {
 
       type: "conversation",
 
-      position: { x: 560, y: 360 },
+      position: { x: 920, y: 580 },
 
       data: {
 
@@ -271,7 +271,7 @@ export function createLoanReminderTemplate(): {
 
       type: "conversation",
 
-      position: { x: 1080, y: 40 },
+      position: { x: 2300, y: 220 },
 
       data: {
 
@@ -295,7 +295,7 @@ export function createLoanReminderTemplate(): {
 
       type: "conversation",
 
-      position: { x: 840, y: 200 },
+      position: { x: 1380, y: 520 },
 
       data: {
 
@@ -319,7 +319,7 @@ export function createLoanReminderTemplate(): {
 
       type: "end",
 
-      position: { x: 1320, y: 220 },
+      position: { x: 2760, y: 380 },
 
       data: { title: "End", status: "Completed" },
 
@@ -459,11 +459,11 @@ export function createLoanReminderTemplate(): {
 
     {
 
-      id: "e-qa-silence-replay",
+      id: "e-qa-silence-byee",
 
       source: "qa-payment",
 
-      target: "qa-payment",
+      target: "conv-byee",
 
       sourceHandle: NO_RESPONSE_HANDLE,
 

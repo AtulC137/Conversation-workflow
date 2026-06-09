@@ -1,0 +1,163 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkflowStatus {
+  draft
+  published
+  archived
+}
+
+enum VoiceSessionStatus {
+  active
+  completed
+  expired
+  failed
+}
+
+enum TurnSpeaker {
+  caller
+  assistant
+  system
+}
+
+enum CompletionStatus {
+  complete
+  interrupted
+  skipped
+  cancelled
+}
+
+model User {
+  id           String   @id @db.Char(36)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  name         String   @db.VarChar(120)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  authSessions      AuthSession[]
+  workflows         Workflow[]
+  voiceSessions     VoiceSession[]
+  publishedVersions WorkflowVersion[] @relation("PublishedBy")
+
+  @@map("users")
+}
+
+model AuthSession {
+  id               String    @id @db.Char(36)
+  userId           String    @map("user_id") @db.Char(36)
+  refreshTokenHash String    @map("refresh_token_hash") @db.VarChar(255)
+  expiresAt        DateTime  @map("expires_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  revokedAt        DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([refreshTokenHash])
+  @@map("auth_sessions")
+}
+
+model Workflow {
+  id        String         @id @db.Char(36)
+  userId    String         @map("user_id") @db.Char(36)
+  name      String         @default("Untitled workflow") @db.VarChar(200)
+  context   String         @db.Text
+  tools     Json
+  nodes     Json
+  edges     Json
+  status    WorkflowStatus @default(draft)
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  user          User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions      WorkflowVersion[]
+  voiceSessions VoiceSession[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@index([userId, status])
+  @@map("workflows")
+}
+
+model WorkflowVersion {
+  id            String   @id @db.Char(36)
+  workflowId    String   @map("workflow_id") @db.Char(36)
+  versionNumber Int      @map("version_number")
+  snapshot      Json
+  publishedBy   String   @map("published_by") @db.Char(36)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  workflow        Workflow       @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  publisher       User           @relation("PublishedBy", fields: [publishedBy], references: [id])
+  voiceSessions   VoiceSession[]
+
+  @@unique([workflowId, versionNumber])
+  @@map("workflow_versions")
+}
+
+model VoiceSession {
+  id                String             @id @db.Char(36)
+  userId            String             @map("user_id") @db.Char(36)
+  workflowId        String?            @map("workflow_id") @db.Char(36)
+  workflowVersionId String?            @map("workflow_version_id") @db.Char(36)
+  context           String             @db.Text
+  example           String             @db.Text
+  endPoints         Json               @map("end_points")
+  greeting          String?            @db.VarChar(500)
+  graph             Json
+  status            VoiceSessionStatus @default(active)
+  startedAt         DateTime?          @map("started_at")
+  endedAt           DateTime?          @map("ended_at")
+  expiresAt         DateTime           @map("expires_at")
+  createdAt         DateTime           @default(now()) @map("created_at")
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workflow        Workflow?        @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+  workflowVersion WorkflowVersion? @relation(fields: [workflowVersionId], references: [id], onDelete: SetNull)
+  callTurns       CallTurn[]
+  sessionEvents   SessionEvent[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([workflowId])
+  @@index([status, expiresAt])
+  @@map("voice_sessions")
+}
+
+model CallTurn {
+  id               BigInt           @id @default(autoincrement())
+  sessionId        String           @map("session_id") @db.Char(36)
+  turnIndex        Int              @map("turn_index")
+  speaker          TurnSpeaker
+  nodeId           String?          @map("node_id") @db.VarChar(64)
+  content          String           @db.Text
+  isComplete       Boolean          @default(true) @map("is_complete")
+  completionStatus CompletionStatus @default(complete) @map("completion_status")
+  metadata         Json?
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  session VoiceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, turnIndex])
+  @@index([sessionId, createdAt])
+  @@map("call_turns")
+}
+
+model SessionEvent {
+  id        BigInt   @id @default(autoincrement())
+  sessionId String   @map("session_id") @db.Char(36)
+  eventType String   @map("event_type") @db.VarChar(50)
+  nodeId    String?  @map("node_id") @db.VarChar(64)
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session VoiceSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("session_events")
+}

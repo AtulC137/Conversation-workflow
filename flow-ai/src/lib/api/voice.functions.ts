@@ -30,6 +30,7 @@ const workflowGraphEdgeSchema = z.object({
 });
 
 const voiceSessionConfigSchema = z.object({
+  workflowId: z.string().optional(),
   context: z.string(),
   example: z.string(),
   endPoints: z.array(z.string()),
@@ -38,21 +39,27 @@ const voiceSessionConfigSchema = z.object({
     nodes: z.array(workflowGraphNodeSchema),
     edges: z.array(workflowGraphEdgeSchema),
   }),
+  accessToken: z.string(),
 });
 
 export const createVoiceSession = createServerFn({ method: "POST" })
   .inputValidator(voiceSessionConfigSchema)
   .handler(async ({ data }) => {
-    const { voiceBackendUrl } = getServerConfig();
-    const res = await fetch(`${voiceBackendUrl}/sessions`, {
+    const { apiUrl } = getServerConfig();
+    const { accessToken, workflowId, ...sessionConfig } = data;
+
+    const res = await fetch(`${apiUrl}/api/voice-sessions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({ ...sessionConfig, workflowId }),
     });
 
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`Voice backend error (${res.status}): ${text}`);
+      throw new Error(`Voice session error (${res.status}): ${text}`);
     }
 
     return res.json() as Promise<{ sessionId: string }>;

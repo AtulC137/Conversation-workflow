@@ -20,5 +20,7 @@ export function getServerConfig() {
   return {
     nodeEnv: process.env.NODE_ENV,
     voiceBackendUrl: process.env.VOICE_BACKEND_URL ?? "http://localhost:8000",
+    // API_URL = server-side / Docker internal host; VITE_API_URL = browser fallback for local dev
+    apiUrl: process.env.API_URL ?? process.env.VITE_API_URL ?? "http://localhost:3001",
   };
 }

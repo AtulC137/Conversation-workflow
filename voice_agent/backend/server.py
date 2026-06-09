@@ -16,7 +16,9 @@ from stt import run_streaming_stt
 import llm as llm_module
 import tts as tts_module
 from tts import TtsWsSession
-from sessions import create_session, get_session
+import db as db_module
+from call_logger import CallLogger
+from sessions import create_session, get_session_async
 from workflow_runner import WorkflowRunner
 
 logging.basicConfig(
@@ -33,6 +35,7 @@ PCM_TTS_START = {"type": "tts_start", "format": "pcm_s16le", "sampleRate": 16000
 
 
 class SessionCreateBody(BaseModel):
+    sessionId: str | None = None
     context: str = ""
     example: str = ""
     endPoints: list[str] = Field(default_factory=list)
@@ -40,10 +43,16 @@ class SessionCreateBody(BaseModel):
     graph: dict = Field(default_factory=dict)
 
 
+@app.on_event("startup")
+async def startup():
+    await db_module.init_pool()
+
+
 @app.on_event("shutdown")
 async def shutdown():
     await llm_module.close()
     await tts_module.close()
+    await db_module.close_pool()
 
 
 @app.get("/health")
@@ -53,14 +62,14 @@ async def health():
 
 @app.post("/sessions")
 async def create_voice_session(body: SessionCreateBody):
-    session_id = create_session(body.model_dump())
+    session_id = create_session(body.model_dump(), session_id=body.sessionId)
     logger.info(f"[SESSION CREATED] {session_id}")
     return {"sessionId": session_id}
 
 
 @app.get("/sessions/{session_id}")
 async def get_voice_session(session_id: str):
-    session = get_session(session_id)
+    session = await get_session_async(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     return {
@@ -80,13 +89,17 @@ async def audio_ws(websocket: WebSocket):
         await websocket.close(code=4000, reason="sessionId query param required")
         return
 
-    voice_session = get_session(session_id)
+    voice_session = await get_session_async(session_id)
     if voice_session is None:
         await websocket.close(code=4004, reason="Session not found or expired")
         return
 
     await websocket.accept()
     logger.info(f"[CLIENT CONNECTED] session={session_id}")
+
+    call_logger = CallLogger(session_id)
+    await db_module.mark_session_started(session_id)
+    await call_logger.log_event("ws_connected")
 
     workflow_runner = WorkflowRunner(voice_session.graph)
     base_context = voice_session.context
@@ -115,6 +128,8 @@ async def audio_ws(websocket: WebSocket):
     _llm_start_at: float | None = None
     _first_pcm_logged: bool = False
     _prewarm_task: asyncio.Task | None = None
+    _silence_timer_task: asyncio.Task | None = None
+    _caller_listening: bool = False
 
     tts_session = TtsWsSession()
 
@@ -123,6 +138,10 @@ async def audio_ws(websocket: WebSocket):
         _active_tasks.add(task)
         task.add_done_callback(_active_tasks.discard)
         return task
+
+    def _other_active_tasks() -> set:
+        exclude = {_silence_timer_task} if _silence_timer_task else set()
+        return _active_tasks - exclude
 
     def _schedule_tts_prewarm(lang: str = "en-IN", *, after_abort: bool = False):
         nonlocal _prewarm_task
@@ -152,6 +171,7 @@ async def audio_ws(websocket: WebSocket):
         _turn_cancel.set()
         for t in list(_active_tasks):
             t.cancel()
+        _spawn(_cancel_silence_advance())
 
     def _start_new_turn():
         nonlocal _turn_cancel, _speech_ended, _llm_start_at, _first_pcm_logged, _llm_spawned_this_turn
@@ -167,14 +187,94 @@ async def audio_ws(websocket: WebSocket):
         except Exception:
             pass
 
+    async def _cancel_silence_advance():
+        nonlocal _silence_timer_task
+        if _silence_timer_task and not _silence_timer_task.done():
+            _silence_timer_task.cancel()
+            try:
+                await _silence_timer_task
+            except asyncio.CancelledError:
+                pass
+        _silence_timer_task = None
+
     def _maybe_start_turn(transcript: str):
         nonlocal _llm_spawned_this_turn, _speech_ended
         if _llm_spawned_this_turn or _is_closing or _greeting_active or _turn_cancel.is_set():
             return
+        _spawn(_cancel_silence_advance())
         _llm_spawned_this_turn = True
         _speech_ended = False
         logger.info(f"[TURN END] processing: {transcript!r}")
+        _spawn(call_logger.log_caller(
+            transcript,
+            node_id=workflow_runner.current_node_id,
+            metadata={"sttLang": _turn_stt_lang} if _turn_stt_lang else None,
+        ))
         _spawn(_run_turn(transcript, _turn_cancel, _turn_stt_lang))
+
+    async def _silence_wait_and_advance():
+        timeout = workflow_runner.get_silence_timeout_sec()
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if _is_closing or stop_event.is_set() or _greeting_active:
+            return
+        if not _caller_listening:
+            return
+        if _other_active_tasks():
+            return
+        if not workflow_runner.node_waits_for_caller():
+            return
+        if not workflow_runner.find_no_response_target():
+            return
+        source_id = workflow_runner.current_node_id
+        via = (
+            "no-response"
+            if workflow_runner.has_explicit_no_response_wire()
+            else "ai-out"
+        )
+        next_id = workflow_runner.advance_no_response()
+        if not next_id:
+            return
+        logger.info(
+            f"[SILENCE] {via} from node={source_id} → node={next_id} "
+            f"after {timeout}s"
+        )
+        await call_logger.log_event(
+            "silence_timeout",
+            node_id=source_id,
+            payload={"via": via, "nextNodeId": next_id, "timeoutSec": timeout},
+        )
+        await _speak_entered_node(next_id, _turn_cancel)
+
+    async def _schedule_silence_advance():
+        nonlocal _silence_timer_task
+        if _is_closing or _greeting_active or stop_event.is_set():
+            return
+        if not _caller_listening:
+            return
+        if not workflow_runner.node_waits_for_caller():
+            return
+        if not workflow_runner.find_no_response_target():
+            return
+        await _cancel_silence_advance()
+        _silence_timer_task = asyncio.create_task(_silence_wait_and_advance())
+
+    async def _enter_ai_output():
+        nonlocal _caller_listening
+        _caller_listening = False
+        await _cancel_silence_advance()
+
+    async def _on_caller_ready():
+        nonlocal _caller_listening
+        _caller_listening = True
+        logger.info("[LISTENING] Caller ready — mic open, silence timer armed")
+        await _schedule_silence_advance()
+
+    async def _resume_silence_if_waiting():
+        if _caller_listening and workflow_runner.node_waits_for_caller():
+            await _schedule_silence_advance()
 
     async def _abort_tts():
         if _is_closing:
@@ -201,6 +301,7 @@ async def audio_ws(websocket: WebSocket):
         async def on_chunk(chunk: bytes):
             await _send_pcm_chunk(chunk, cancel)
 
+        await _enter_ai_output()
         await _send(PCM_TTS_START)
         await tts_session.begin_turn(tts_lang, on_chunk)
 
@@ -211,6 +312,7 @@ async def audio_ws(websocket: WebSocket):
             ok = await tts_session.end_turn()
             if ok and not cancel.is_set():
                 await _send({"type": "tts_end"})
+                await call_logger.complete_ai_turn(fallback_text)
             else:
                 logger.warning("[TTS] Stream failed — falling back to speak_full")
                 await tts_session.abort()
@@ -226,6 +328,7 @@ async def audio_ws(websocket: WebSocket):
         if stop_event.is_set() or (cancellable and cancel.is_set()):
             return
 
+        await _enter_ai_output()
         await _send(PCM_TTS_START)
 
         async def on_chunk(chunk: bytes):
@@ -241,6 +344,10 @@ async def audio_ws(websocket: WebSocket):
                 await _send({"type": "tts_end"})
             elif not cancellable or not cancel.is_set():
                 await _send({"type": "tts_end"})
+                if not cancellable:
+                    await call_logger.complete_ai_turn(text)
+                elif cancellable:
+                    await call_logger.complete_ai_turn(text)
 
         try:
             await tts_session.speak_full(text, tts_lang, on_chunk, on_done)
@@ -257,6 +364,9 @@ async def audio_ws(websocket: WebSocket):
             return
         _is_closing = True
         logger.info("[SESSION] Closing after goodbye")
+        await call_logger.flush_ai_interrupted()
+        await call_logger.log_event("session_end", node_id=workflow_runner.current_node_id)
+        await db_module.mark_session_completed(session_id)
         await _send({"type": "session_end"})
         stop_event.set()
         await asyncio.sleep(0.5)
@@ -268,6 +378,8 @@ async def audio_ws(websocket: WebSocket):
     async def _speak_scripted(text: str, tts_lang: str, cancel: asyncio.Event, hangup_after: bool):
         if cancel.is_set() or stop_event.is_set() or not text:
             return
+        await _enter_ai_output()
+        await call_logger.start_ai_turn(node_id=workflow_runner.current_node_id)
         await _send({"type": "llm_start"})
         await _speak_full_turn(text, tts_lang, cancel, cancellable=not hangup_after)
         await _send({"type": "llm_end", "text": text})
@@ -276,12 +388,11 @@ async def audio_ws(websocket: WebSocket):
             await _end_session()
 
     async def _speak_entered_node(target_id: str, cancel: asyncio.Event):
-        if workflow_runner.is_qa_node(target_id) and workflow_runner.qa_handled:
-            logger.info("[QA] skipped — already answered earlier")
-            skipped = workflow_runner.skip_qa_if_handled()
-            if not skipped:
-                return
-            target_id = skipped
+        workflow_runner.current_node_id = target_id
+
+        if workflow_runner.is_end_node(target_id):
+            await _end_session()
+            return
 
         if workflow_runner.is_user_input_node(target_id):
             await _run_context_tell(cancel, target_id)
@@ -295,9 +406,9 @@ async def audio_ws(websocket: WebSocket):
             return
 
         message = workflow_runner.get_message(target_id)
-        terminal = workflow_runner.is_terminal(target_id)
+        hangup_after = workflow_runner.should_hangup_after_speak(target_id)
         if message:
-            await _speak_scripted(message, _current_tts_lang, cancel, terminal)
+            await _speak_scripted(message, _current_tts_lang, cancel, hangup_after)
 
     async def _advance_via_out_and_speak(cancel: asyncio.Event):
         source_id = workflow_runner.current_node_id
@@ -308,12 +419,24 @@ async def audio_ws(websocket: WebSocket):
         await _speak_entered_node(next_id, cancel)
 
     async def _advance_and_speak(branch_id: str, cancel: asyncio.Event):
+        source_id = workflow_runner.current_node_id
+        no_questions_branch = (
+            workflow_runner.is_qa_node(source_id)
+            and branch_id == workflow_runner.find_no_questions_branch(source_id)
+        )
         target_id = workflow_runner.advance(branch_id)
         if not target_id:
             return
+        if no_questions_branch:
+            workflow_runner.mark_qa_handled()
         logger.info(
             f"[WORKFLOW] branch={branch_id} → node={target_id} "
-            f"terminal={workflow_runner.is_terminal(target_id)}"
+            f"hangup_after={workflow_runner.should_hangup_after_speak(target_id)}"
+        )
+        await call_logger.log_event(
+            "branch_advance",
+            node_id=workflow_runner.current_node_id,
+            payload={"branchId": branch_id, "targetId": target_id},
         )
         await _speak_entered_node(target_id, cancel)
 
@@ -351,8 +474,6 @@ async def audio_ws(websocket: WebSocket):
         cancel: asyncio.Event,
         stt_lang: str | None,
         node_message: str,
-        *,
-        mark_handled: bool,
     ):
         logger.info(
             f"[WORKFLOW] off-script → context Q&A at node={workflow_runner.current_node_id} "
@@ -378,8 +499,6 @@ async def audio_ws(websocket: WebSocket):
                 on_language_retry=on_language_retry,
                 node_id=workflow_runner.current_node_id,
             )
-            if mark_handled:
-                workflow_runner.mark_qa_handled()
         except asyncio.CancelledError:
             _tts_streaming = False
         except Exception as e:
@@ -398,6 +517,8 @@ async def audio_ws(websocket: WebSocket):
         if event_type == "speech_start":
             if _is_closing:
                 return
+            if not _caller_listening:
+                return
             if _greeting_active:
                 logger.info("[VAD] Greeting in progress — ignoring speech_start interrupt")
                 return
@@ -405,6 +526,10 @@ async def audio_ws(websocket: WebSocket):
             _tts_streaming = False
             await _abort_tts()
             _schedule_tts_prewarm(_current_tts_lang, after_abort=True)
+            await _cancel_silence_advance()
+
+            await call_logger.flush_ai_interrupted()
+            await call_logger.log_event("speech_start", node_id=workflow_runner.current_node_id)
 
             if _active_tasks:
                 logger.info(f"[VAD INTERRUPT] Cancelling {len(_active_tasks)} task(s)")
@@ -416,7 +541,7 @@ async def audio_ws(websocket: WebSocket):
             await _send({"type": "speech_start"})
 
         elif event_type == "transcript" and text:
-            if _is_closing or _greeting_active:
+            if _is_closing or _greeting_active or not _caller_listening:
                 return
 
             if stt_lang:
@@ -430,7 +555,7 @@ async def audio_ws(websocket: WebSocket):
                 _maybe_start_turn(text)
 
         elif event_type == "speech_end":
-            if _is_closing or _greeting_active:
+            if _is_closing or _greeting_active or not _caller_listening:
                 return
 
             await _send({"type": "speech_end"})
@@ -449,18 +574,25 @@ async def audio_ws(websocket: WebSocket):
             if event_type == "llm_start":
                 if _turn_cancel.is_set() or stop_event.is_set():
                     return
+                await _enter_ai_output()
                 _llm_start_at = time.monotonic()
                 _tts_streaming = True
+                await call_logger.start_ai_turn(
+                    node_id=workflow_runner.current_node_id,
+                    metadata={"responseLang": response_lang} if response_lang else None,
+                )
                 await _begin_tts_turn(_turn_cancel, _current_tts_lang)
 
             elif event_type == "llm_token" and text and _tts_streaming:
                 if _turn_cancel.is_set() or stop_event.is_set():
                     return
+                call_logger.append_ai_token(text)
                 await tts_session.feed_text(text)
 
             elif event_type == "llm_end" and text:
                 if _turn_cancel.is_set() or stop_event.is_set():
                     _tts_streaming = False
+                    await call_logger.flush_ai_interrupted(full_generated=text)
                     return
 
                 tts_lang = llm_module.tts_code_for_language(response_lang or _last_lang or "english")
@@ -480,6 +612,14 @@ async def audio_ws(websocket: WebSocket):
         nonlocal _last_lang, _current_tts_lang, _tts_aborted_for_retry, _tts_streaming
         if cancel.is_set() or stop_event.is_set() or _is_closing:
             return
+
+        try:
+            await _run_turn_body(transcript, cancel, stt_lang)
+        finally:
+            await _resume_silence_if_waiting()
+
+    async def _run_turn_body(transcript: str, cancel: asyncio.Event, stt_lang: str | None = None):
+        nonlocal _last_lang, _current_tts_lang, _tts_aborted_for_retry, _tts_streaming
 
         lang = llm_module.resolve_response_language(stt_lang, transcript)
         if _last_lang is not None and lang != _last_lang:
@@ -510,6 +650,13 @@ async def audio_ws(websocket: WebSocket):
                 )
                 return
 
+            if node and llm_module.looks_like_noise(transcript):
+                logger.info(
+                    f"[NOISE] ignored node={workflow_runner.current_node_id} "
+                    f"transcript={transcript!r}"
+                )
+                return
+
             if workflow_runner.is_user_input_node() and node:
                 instruction = workflow_runner.get_instruction() or node_message
                 if llm_module.looks_like_acknowledgment(transcript):
@@ -521,9 +668,7 @@ async def audio_ws(websocket: WebSocket):
                     return
 
                 if llm_module.looks_like_factual_question(transcript):
-                    await _run_context_qa(
-                        transcript, cancel, stt_lang, instruction, mark_handled=False
-                    )
+                    await _run_context_qa(transcript, cancel, stt_lang, instruction)
                     return
 
                 logger.info(
@@ -544,9 +689,7 @@ async def audio_ws(websocket: WebSocket):
                         return
 
                 if llm_module.looks_like_factual_question(transcript):
-                    await _run_context_qa(
-                        transcript, cancel, stt_lang, node_message, mark_handled=True
-                    )
+                    await _run_context_qa(transcript, cancel, stt_lang, node_message)
                     return
 
                 branch_id = await llm_module.classify_branch(transcript, branches, node_message)
@@ -561,6 +704,15 @@ async def audio_ws(websocket: WebSocket):
                 return
 
             if workflow_runner.is_qa_node() and node:
+                if llm_module.looks_like_filler(transcript) or llm_module.looks_like_noise(
+                    transcript
+                ):
+                    logger.info(
+                        f"[QA] filler/noise ignored node={workflow_runner.current_node_id} "
+                        f"transcript={transcript!r}"
+                    )
+                    return
+
                 if llm_module.looks_like_negative(transcript):
                     no_branch = workflow_runner.find_no_questions_branch()
                     if no_branch:
@@ -572,9 +724,7 @@ async def audio_ws(websocket: WebSocket):
                         return
 
                 if llm_module.looks_like_factual_question(transcript):
-                    await _run_context_qa(
-                        transcript, cancel, stt_lang, node_message, mark_handled=False
-                    )
+                    await _run_context_qa(transcript, cancel, stt_lang, node_message)
                     return
 
                 if llm_module.looks_like_acknowledgment(transcript):
@@ -645,8 +795,10 @@ async def audio_ws(websocket: WebSocket):
         nonlocal _greeting_active
         try:
             logger.info(f"[GREETING] Playing: {greeting!r}")
+            await call_logger.start_ai_turn(node_id=workflow_runner.current_node_id)
             await _send({"type": "greeting_start", "text": greeting})
             await _speak_full_turn(greeting, "en-IN", _turn_cancel, cancellable=False)
+            await call_logger.log_event("greeting_end", payload={"text": greeting})
         except Exception as e:
             logger.error(f"[GREETING] Failed: {e}")
         finally:
@@ -664,8 +816,12 @@ async def audio_ws(websocket: WebSocket):
             await _send({"type": "greeting_end"})
 
     async def handle_client_interrupt():
+        nonlocal _caller_listening
         if _is_closing or _greeting_active:
             return
+
+        await call_logger.flush_ai_interrupted()
+        await call_logger.log_event("client_interrupt", node_id=workflow_runner.current_node_id)
 
         _tts_streaming = False
         await _abort_tts()
@@ -677,6 +833,14 @@ async def audio_ws(websocket: WebSocket):
             _start_new_turn()
             _transcript_buffer.clear()
 
+        _caller_listening = True
+        logger.info("[LISTENING] Caller ready after barge-in")
+
+    async def handle_tts_playback_done():
+        if _is_closing or stop_event.is_set():
+            return
+        await _on_caller_ready()
+
     stt_task = asyncio.create_task(run_streaming_stt(audio_queue, on_event, stop_event))
     asyncio.create_task(_session_startup())
 
@@ -685,7 +849,7 @@ async def audio_ws(websocket: WebSocket):
             message = await websocket.receive()
 
             if "bytes" in message and message["bytes"]:
-                if _is_closing:
+                if _is_closing or not _caller_listening:
                     continue
                 data = message["bytes"]
                 try:
@@ -702,6 +866,8 @@ async def audio_ws(websocket: WebSocket):
                     payload = json.loads(message["text"])
                     if payload.get("type") == "client_interrupt":
                         await handle_client_interrupt()
+                    elif payload.get("type") == "tts_playback_done":
+                        await handle_tts_playback_done()
                 except Exception as e:
                     logger.debug(f"[TEXT MSG PARSE ERROR] {e}")
 

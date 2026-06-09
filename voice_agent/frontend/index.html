@@ -410,6 +410,32 @@
     invalidateTtsSession();
   }
 
+  function notifyTtsPlaybackComplete(endSession) {
+    if (endSession !== activeTtsSession) return;
+    if (farewellMode) {
+      waitForTtsPlaybackThenCleanup();
+      return;
+    }
+    ttsPlaying = false;
+    llmThinking = false;
+    if (greetingMode) {
+      greetingMode = false;
+    }
+    micSending = true;
+    setStatus('listening', 'Listening · Speak now');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'tts_playback_done' }));
+    }
+  }
+
+  function scheduleTtsPlaybackComplete(endSession) {
+    const ctx = ttsAudioCtx;
+    const remainingMs = ctx && ctx.state !== 'closed'
+      ? Math.max(0, (ttsNextPlayAt - ctx.currentTime) * 1000) + 100
+      : 0;
+    setTimeout(() => notifyTtsPlaybackComplete(endSession), remainingMs);
+  }
+
   function stopMicAndWs() {
     if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
     if (workletNode) { workletNode.disconnect(); workletNode = null; }
@@ -606,6 +632,7 @@
         stopTtsNow();
         invalidateTtsSession();
         markAiTurnInterrupted();
+        micSending = true;
         setStatus('interrupted', 'Interrupted · Listening...');
         addTranscriptLine('t-event', '── interrupted');
         break;
@@ -625,6 +652,7 @@
         if (farewellMode || greetingMode) break;
         stopTtsNow();
         invalidateTtsSession();
+        micSending = true;
         setStatus('speech', 'Listening · Speech detected');
         addTranscriptLine('t-event', '── speech detected');
         break;
@@ -641,6 +669,7 @@
       case 'llm_start':
         if (farewellMode) break;
         llmThinking = true;
+        micSending = false;
         setStatus('thinking', 'AI thinking...');
         startAiTurn();
         break;
@@ -678,6 +707,7 @@
       case 'tts_start':
         if (msg.sampleRate) ttsSampleRate = msg.sampleRate;
         beginTtsSession();
+        micSending = false;
         if (greetingMode) {
           setStatus('speaking', 'Susha introducing...');
         } else {
@@ -686,26 +716,7 @@
         break;
 
       case 'tts_end':
-        {
-          const endSession = activeTtsSession;
-          const ctx = ttsAudioCtx;
-          const remainingMs = ctx && ctx.state !== 'closed'
-            ? Math.max(0, (ttsNextPlayAt - ctx.currentTime) * 1000) + 100
-            : 0;
-          setTimeout(() => {
-            if (endSession !== activeTtsSession) return;
-            if (farewellMode) {
-              waitForTtsPlaybackThenCleanup();
-            } else {
-              ttsPlaying = false;
-              if (greetingMode) {
-                greetingMode = false;
-                micSending = true;
-              }
-              setStatus('listening', 'Listening · Speak now');
-            }
-          }, remainingMs);
-        }
+        scheduleTtsPlaybackComplete(activeTtsSession);
         break;
     }
   }
@@ -802,6 +813,7 @@
             llmThinking = false;
             stopTtsNow();
             invalidateTtsSession();
+            micSending = true;
             ws.send(JSON.stringify({ type: 'client_interrupt' }));
           }
           return;

@@ -1,4 +1,5 @@
 export const NO_RESPONSE_HANDLE = "no-response";
+export const DEFAULT_SILENCE_TIMEOUT_SEC = 2;
 
 export type ResponseBranch = {
   id: string;

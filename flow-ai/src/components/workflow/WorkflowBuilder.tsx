@@ -44,12 +44,23 @@ import { QaNode } from "./nodes/QaNode";
 import { UserInputNode } from "./nodes/UserInputNode";
 import {
   canTestWorkflow,
+  DEFAULT_SILENCE_TIMEOUT_SEC,
   defaultWorkflowTools,
   type NodeData,
   type WorkflowTools,
 } from "./types";
-import { createInitialEdges, createInitialNodes, createLoanReminderWorkflow } from "./initialFlow";
+import { createInitialEdges, createInitialNodes } from "./initialFlow";
+import { getAccessToken } from "@/lib/api/client";
 import { createVoiceSession } from "@/lib/api/voice.functions";
+import {
+  createWorkflow as createWorkflowApi,
+  deleteWorkflow as deleteWorkflowApi,
+  getWorkflow,
+  listWorkflows,
+  publishWorkflow,
+  updateWorkflow,
+} from "@/lib/api/workflows";
+import { useAuth } from "@/lib/auth/AuthContext";
 import { graphHasQaBlock, workflowToPrompt } from "@/lib/workflow-to-prompt";
 import { Toaster } from "@/components/ui/sonner";
 import {
@@ -78,22 +89,31 @@ type Workflow = {
   edges: Edge[];
   tools: WorkflowTools;
   context: string;
+  status: string;
   updatedAt: number;
 };
 
 const marker = { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "#3f3f46" } as const;
 
-const loanReminderTemplate = createLoanReminderWorkflow();
-
-function makeWorkflow(name = "Untitled workflow"): Workflow {
+function apiToWorkflow(w: {
+  id: string;
+  name: string;
+  nodes: Node<NodeData>[];
+  edges: Edge[];
+  tools: WorkflowTools;
+  context: string;
+  status: string;
+  updatedAt: number;
+}): Workflow {
   return {
-    id: `wf-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    name,
-    nodes: createInitialNodes(),
-    edges: createInitialEdges(),
-    tools: defaultWorkflowTools(),
-    context: "",
-    updatedAt: Date.now(),
+    id: w.id,
+    name: w.name,
+    nodes: w.nodes,
+    edges: w.edges,
+    tools: w.tools,
+    context: w.context,
+    status: w.status,
+    updatedAt: w.updatedAt,
   };
 }
 
@@ -145,8 +165,11 @@ function isTypingTarget(target: EventTarget | null) {
 }
 
 function Inner() {
-  const [workflows, setWorkflows] = useState<Workflow[]>(() => [loanReminderTemplate]);
-  const [activeId, setActiveId] = useState<string | null>(() => loanReminderTemplate.id);
+  const { logout } = useAuth();
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [loadingWorkflows, setLoadingWorkflows] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [testOpen, setTestOpen] = useState(false);
@@ -180,6 +203,75 @@ function Inner() {
     },
     [activeId],
   );
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { workflows: list } = await listWorkflows();
+        if (list.length === 0) {
+          const { workflow } = await createWorkflowApi();
+          const wf = apiToWorkflow(workflow);
+          setWorkflows([wf]);
+          setActiveId(wf.id);
+        } else {
+          const loaded = await Promise.all(
+            list.map(async (s) => {
+              const { workflow } = await getWorkflow(s.id);
+              return apiToWorkflow(workflow);
+            }),
+          );
+          setWorkflows(loaded);
+          setActiveId(loaded[0]?.id ?? null);
+        }
+      } catch (err) {
+        toast.error("Failed to load workflows", {
+          description: err instanceof Error ? err.message : "Could not reach API",
+        });
+      } finally {
+        setLoadingWorkflows(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!active || loadingWorkflows) return;
+
+    const timer = setTimeout(async () => {
+      setSaving(true);
+      try {
+        const { workflow } = await updateWorkflow(active.id, {
+          name: active.name,
+          context: active.context,
+          tools: active.tools,
+          nodes: active.nodes,
+          edges: active.edges,
+        });
+        setWorkflows((ws) =>
+          ws.map((w) =>
+            w.id === workflow.id
+              ? { ...w, updatedAt: workflow.updatedAt, status: workflow.status }
+              : w,
+          ),
+        );
+      } catch (err) {
+        toast.error("Auto-save failed", {
+          description: err instanceof Error ? err.message : "Could not save workflow",
+        });
+      } finally {
+        setSaving(false);
+      }
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [
+    active?.id,
+    active?.name,
+    active?.context,
+    active?.tools,
+    active?.nodes,
+    active?.edges,
+    loadingWorkflows,
+  ]);
 
   const setNodes = useCallback(
     (updater: Node<NodeData>[] | ((nds: Node<NodeData>[]) => Node<NodeData>[])) => {
@@ -304,13 +396,22 @@ function Inner() {
     [nodes, selectedId],
   );
 
-  const createWorkflow = useCallback(() => {
-    const wf = makeWorkflow(`Workflow ${workflows.length + 1}`);
-    setWorkflows((ws) => [wf, ...ws]);
-    setActiveId(wf.id);
-    setSelectedId(null);
-    setSelectedEdgeId(null);
-    setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 50);
+  const createWorkflow = useCallback(async () => {
+    try {
+      const { workflow } = await createWorkflowApi({
+        name: `Workflow ${workflows.length + 1}`,
+      });
+      const wf = apiToWorkflow(workflow);
+      setWorkflows((ws) => [wf, ...ws]);
+      setActiveId(wf.id);
+      setSelectedId(null);
+      setSelectedEdgeId(null);
+      setTimeout(() => fitView({ padding: 0.35, duration: 250 }), 50);
+    } catch (err) {
+      toast.error("Failed to create workflow", {
+        description: err instanceof Error ? err.message : "Could not create workflow",
+      });
+    }
   }, [workflows.length, fitView]);
 
   const selectWorkflow = useCallback((id: string) => {
@@ -340,6 +441,7 @@ function Inner() {
         responses: [],
         tone: "Professional",
         notes: "",
+        silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
       },
     };
     setNodes((nds) => [...nds, newNode]);
@@ -364,6 +466,7 @@ function Inner() {
           },
         ],
         notes: "",
+        silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
       },
     };
     setNodes((nds) => [...nds, newNode]);
@@ -382,6 +485,7 @@ function Inner() {
         instruction: "Check context and tell the user all relevant details.",
         waitForResponse: true,
         notes: "",
+        silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
       },
     };
     setNodes((nds) => [...nds, newNode]);
@@ -462,8 +566,15 @@ function Inner() {
         return;
       }
       try {
+        const token = getAccessToken();
+        if (!token) {
+          toast.error("Not signed in");
+          return;
+        }
         const config = workflowToPrompt(nodes, edges, workflowContext);
-        const { sessionId } = await createVoiceSession({ data: config });
+        const { sessionId } = await createVoiceSession({
+          data: { ...config, workflowId: active?.id, accessToken: token },
+        });
         const voiceUiUrl = import.meta.env.VITE_VOICE_UI_URL ?? "http://localhost:3000";
         window.open(`${voiceUiUrl}/?session=${sessionId}`, "_blank");
       } catch (err) {
@@ -475,7 +586,29 @@ function Inner() {
     }
 
     setTestOpen(true);
-  }, [tools, nodes, edges, workflowContext]);
+  }, [tools, nodes, edges, workflowContext, active?.id]);
+
+  const handlePublish = useCallback(async () => {
+    if (!active) return;
+    try {
+      const { version } = await publishWorkflow(active.id);
+      setWorkflows((ws) =>
+        ws.map((w) => (w.id === active.id ? { ...w, status: "published" } : w)),
+      );
+      toast.success("Workflow published", {
+        description: `Version ${version.versionNumber} is live.`,
+      });
+    } catch (err) {
+      toast.error("Publish failed", {
+        description: err instanceof Error ? err.message : "Could not publish workflow",
+      });
+    }
+  }, [active]);
+
+  const handleLogout = useCallback(async () => {
+    await logout();
+    window.location.href = "/login";
+  }, [logout]);
 
   const copySelectedBlock = useCallback(() => {
     if (!selectedNode || selectedNode.type === "start") return;
@@ -493,17 +626,26 @@ function Inner() {
     toast.success("Block pasted");
   }, [active, clipboard, setNodes, setCenter]);
 
-  const confirmDelete = useCallback(() => {
+  const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
 
     if (pendingDelete.kind === "workflow") {
       const deletedId = pendingDelete.id;
-      const remaining = workflows.filter((w) => w.id !== deletedId);
-      setWorkflows(remaining);
-      if (activeId === deletedId) {
-        setActiveId(remaining[0]?.id ?? null);
-        setSelectedId(null);
-        setSelectedEdgeId(null);
+      try {
+        await deleteWorkflowApi(deletedId);
+        const remaining = workflows.filter((w) => w.id !== deletedId);
+        setWorkflows(remaining);
+        if (activeId === deletedId) {
+          setActiveId(remaining[0]?.id ?? null);
+          setSelectedId(null);
+          setSelectedEdgeId(null);
+        }
+      } catch (err) {
+        toast.error("Failed to delete workflow", {
+          description: err instanceof Error ? err.message : "Could not delete workflow",
+        });
+        setPendingDelete(null);
+        return;
       }
     } else if (pendingDelete.kind === "node") {
       const node = nodes.find((n) => n.id === pendingDelete.id);
@@ -560,6 +702,14 @@ function Inner() {
 
   const toolConfigInitialValue = tools.whatsapp.phoneNumber;
 
+  if (loadingWorkflows) {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
+        Loading workflows…
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       <Sidebar
@@ -575,11 +725,15 @@ function Inner() {
       <div className="flex min-w-0 flex-1 flex-col">
         <TopHeader
           title={active?.name ?? "No workflow selected"}
+          status={active?.status ?? "draft"}
           canEdit={!!active}
           tools={tools}
           hasContext={workflowContext.trim().length > 0}
+          saving={saving}
           onTitleChange={renameWorkflow}
           onTest={handleTest}
+          onPublish={handlePublish}
+          onLogout={handleLogout}
           onOpenContext={() => setContextOpen(true)}
           onToggleTool={handleToggleTool}
           onConfigureTool={handleConfigureTool}
@@ -609,7 +763,7 @@ function Inner() {
                   }}
                   nodeTypes={nodeTypes}
                   fitView
-                  fitViewOptions={{ padding: 0.2 }}
+                  fitViewOptions={{ padding: 0.35 }}
                   proOptions={{ hideAttribution: true }}
                   deleteKeyCode={null}
                   defaultEdgeOptions={{ type: "smoothstep", markerEnd: marker }}

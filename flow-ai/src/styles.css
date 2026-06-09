@@ -130,3 +130,14 @@
   border-bottom: 1px solid var(--color-border);
   color: oklch(0.22 0.005 270);
 }
+
+/* Dark cursor on white workflow canvas */
+.react-flow__pane {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24'%3E%3Cpath d='M4 2l16 10-7 1-4 9z' fill='%2318181b' stroke='%23ffffff' stroke-width='1.2'/%3E%3C/svg%3E") 2 2, auto;
+}
+.react-flow__pane.dragging {
+  cursor: grabbing;
+}
+.react-flow__node {
+  cursor: pointer;
+}

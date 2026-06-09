@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Navigate } from "@tanstack/react-router";
 import { WorkflowBuilder } from "@/components/workflow/WorkflowBuilder";
+import { useAuth } from "@/lib/auth/AuthContext";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -20,5 +21,19 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
+        Loading…
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" />;
+  }
+
   return <WorkflowBuilder />;
 }
