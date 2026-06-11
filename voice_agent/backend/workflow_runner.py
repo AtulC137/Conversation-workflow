@@ -103,6 +103,12 @@ class WorkflowRunner:
 
 
 
+    def is_react_node(self, node_id: str | None = None) -> bool:
+
+        return self.get_node_type(node_id) == "react"
+
+
+
     def get_instruction(self, node_id: str | None = None) -> str:
 
         nid = node_id or self.current_node_id
@@ -118,6 +124,24 @@ class WorkflowRunner:
             return ""
 
         return (node.get("instruction") or "").strip()
+
+
+
+    def get_reply_guide(self, node_id: str | None = None) -> str:
+
+        nid = node_id or self.current_node_id
+
+        if not nid:
+
+            return ""
+
+        node = self.nodes.get(nid)
+
+        if not node:
+
+            return ""
+
+        return (node.get("replyGuide") or "").strip()
 
 
 
@@ -155,7 +179,7 @@ class WorkflowRunner:
 
         node = self.nodes.get(nid)
 
-        if not node or node.get("type") not in ("conversation", "qa"):
+        if not node or node.get("type") not in ("conversation", "qa", "userInput", "react"):
 
             return []
 
@@ -235,7 +259,7 @@ class WorkflowRunner:
 
         node = self.nodes.get(nid)
 
-        if not node or node.get("type") not in ("conversation", "qa"):
+        if not node or node.get("type") not in ("conversation", "qa", "userInput", "react"):
 
             return False
 
@@ -378,7 +402,7 @@ class WorkflowRunner:
         nid = node_id or self.current_node_id
         if not nid:
             return False
-        if self.is_user_input_node(nid):
+        if self.is_user_input_node(nid) or self.is_react_node(nid):
             return self.get_wait_for_response(nid)
         if self.is_qa_node(nid) or self.is_conversation_node(nid):
             return True

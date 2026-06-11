@@ -2,10 +2,24 @@ import { Prisma } from "@prisma/client";
 import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { hasPermission } from "../lib/permissions.js";
 import { prisma } from "../lib/prisma.js";
 import { routeParam } from "../lib/params.js";
+import {
+  acquireOrExtendLock,
+  getActiveLock,
+  lockToClient,
+  releaseLock,
+} from "../lib/workflow-lock.js";
+import {
+  canAccessWorkflowDelete,
+  canAccessWorkflowRead,
+  canAccessWorkflowWrite,
+  toMemberContext,
+  workflowListWhere,
+} from "../lib/workflow-access.js";
 import type { AuthedRequest } from "../middleware/auth.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requirePermission } from "../middleware/auth.js";
 
 const toolsSchema = z.object({
   voice: z.object({ enabled: z.boolean() }),
@@ -21,16 +35,25 @@ const workflowBodySchema = z.object({
   status: z.enum(["draft", "published", "archived"]).optional(),
 });
 
-function toClientWorkflow(w: {
-  id: string;
-  name: string;
-  context: string;
-  tools: unknown;
-  nodes: unknown;
-  edges: unknown;
-  status: string;
-  updatedAt: Date;
-}) {
+const workflowPutSchema = workflowBodySchema.extend({
+  expectedUpdatedAt: z.number().optional(),
+});
+
+function toClientWorkflow(
+  w: {
+    id: string;
+    name: string;
+    context: string;
+    tools: unknown;
+    nodes: unknown;
+    edges: unknown;
+    status: string;
+    updatedAt: Date;
+    userId: string;
+    user?: { id: string; name: string };
+  },
+  lock?: ReturnType<typeof lockToClient>,
+) {
   return {
     id: w.id,
     name: w.name,
@@ -40,6 +63,11 @@ function toClientWorkflow(w: {
     edges: w.edges,
     status: w.status,
     updatedAt: w.updatedAt.getTime(),
+    createdBy: {
+      id: w.user?.id ?? w.userId,
+      name: w.user?.name ?? "Unknown",
+    },
+    lock: lock ?? null,
   };
 }
 
@@ -65,17 +93,36 @@ export const workflowsRouter = Router();
 workflowsRouter.use(requireAuth);
 
 workflowsRouter.get("/", async (req: AuthedRequest, res) => {
+  const user = req.user!;
+  const member = toMemberContext(user);
+  if (
+    !hasPermission(member, "workflows.view_own") &&
+    !hasPermission(member, "workflows.view_all")
+  ) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
   const rows = await prisma.workflow.findMany({
-    where: { userId: req.user!.id, status: { not: "archived" } },
+    where: workflowListWhere(user),
     orderBy: { updatedAt: "desc" },
-    select: { id: true, name: true, status: true, updatedAt: true },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      updatedAt: true,
+      userId: true,
+      user: { select: { id: true, name: true } },
+    },
   });
+
   res.json({
     workflows: rows.map((r) => ({
       id: r.id,
       name: r.name,
       status: r.status,
       updatedAt: r.updatedAt.getTime(),
+      createdBy: { id: r.user.id, name: r.user.name },
     })),
   });
 });
@@ -83,16 +130,51 @@ workflowsRouter.get("/", async (req: AuthedRequest, res) => {
 workflowsRouter.get("/:id", async (req: AuthedRequest, res) => {
   const id = routeParam(req.params.id);
   const wf = await prisma.workflow.findFirst({
-    where: { id, userId: req.user!.id },
+    where: { id, organizationId: req.user!.organizationId },
+    include: { user: { select: { id: true, name: true } } },
   });
-  if (!wf) {
+  if (!wf || !canAccessWorkflowRead(req.user!, wf)) {
     res.status(404).json({ error: "Workflow not found" });
     return;
   }
-  res.json({ workflow: toClientWorkflow(wf) });
+
+  const lock = await getActiveLock(id);
+  res.json({ workflow: toClientWorkflow(wf, lockToClient(lock)) });
 });
 
-workflowsRouter.post("/", async (req: AuthedRequest, res) => {
+workflowsRouter.post("/:id/lock", async (req: AuthedRequest, res) => {
+  const id = routeParam(req.params.id);
+  const wf = await prisma.workflow.findFirst({
+    where: { id, organizationId: req.user!.organizationId },
+  });
+  if (!wf || !canAccessWorkflowWrite(req.user!, wf)) {
+    res.status(404).json({ error: "Workflow not found" });
+    return;
+  }
+
+  const result = await acquireOrExtendLock(id, req.user!.id);
+  if (!result.ok) {
+    res.status(423).json({
+      error: "Workflow is locked by another user",
+      lock: {
+        userId: result.lockedBy.userId,
+        userName: result.lockedBy.userName,
+        expiresAt: result.lockedBy.expiresAt.getTime(),
+      },
+    });
+    return;
+  }
+
+  res.json({ ok: true, expiresAt: result.expiresAt.getTime() });
+});
+
+workflowsRouter.delete("/:id/lock", async (req: AuthedRequest, res) => {
+  const id = routeParam(req.params.id);
+  const released = await releaseLock(id, req.user!.id);
+  res.json({ ok: released });
+});
+
+workflowsRouter.post("/", requirePermission("workflows.create"), async (req: AuthedRequest, res) => {
   const parsed = workflowBodySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -104,6 +186,7 @@ workflowsRouter.post("/", async (req: AuthedRequest, res) => {
     data: {
       id: uuidv4(),
       userId: req.user!.id,
+      organizationId: req.user!.organizationId,
       name: data.name ?? "Untitled workflow",
       context: data.context ?? "",
       tools: asJson(data.tools ?? defaultTools),
@@ -112,11 +195,15 @@ workflowsRouter.post("/", async (req: AuthedRequest, res) => {
     },
   });
 
-  res.status(201).json({ workflow: toClientWorkflow(wf) });
+  const created = await prisma.workflow.findUnique({
+    where: { id: wf.id },
+    include: { user: { select: { id: true, name: true } } },
+  });
+  res.status(201).json({ workflow: toClientWorkflow(created ?? { ...wf, user: undefined }) });
 });
 
 workflowsRouter.put("/:id", async (req: AuthedRequest, res) => {
-  const parsed = workflowBodySchema.safeParse(req.body);
+  const parsed = workflowPutSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
     return;
@@ -124,14 +211,27 @@ workflowsRouter.put("/:id", async (req: AuthedRequest, res) => {
 
   const id = routeParam(req.params.id);
   const existing = await prisma.workflow.findFirst({
-    where: { id, userId: req.user!.id },
+    where: { id, organizationId: req.user!.organizationId },
+    include: { user: { select: { id: true, name: true } } },
   });
-  if (!existing) {
+  if (!existing || !canAccessWorkflowWrite(req.user!, existing)) {
     res.status(404).json({ error: "Workflow not found" });
     return;
   }
 
   const data = parsed.data;
+  if (
+    data.expectedUpdatedAt !== undefined &&
+    existing.updatedAt.getTime() > data.expectedUpdatedAt
+  ) {
+    const lock = await getActiveLock(id);
+    res.status(409).json({
+      error: "Workflow was modified by another user",
+      workflow: toClientWorkflow(existing, lockToClient(lock)),
+    });
+    return;
+  }
+
   const wf = await prisma.workflow.update({
     where: { id: existing.id },
     data: {
@@ -144,15 +244,19 @@ workflowsRouter.put("/:id", async (req: AuthedRequest, res) => {
     },
   });
 
-  res.json({ workflow: toClientWorkflow(wf) });
+  const updated = await prisma.workflow.findUnique({
+    where: { id: wf.id },
+    include: { user: { select: { id: true, name: true } } },
+  });
+  res.json({ workflow: toClientWorkflow(updated ?? { ...wf, user: undefined }) });
 });
 
 workflowsRouter.delete("/:id", async (req: AuthedRequest, res) => {
   const id = routeParam(req.params.id);
   const existing = await prisma.workflow.findFirst({
-    where: { id, userId: req.user!.id },
+    where: { id, organizationId: req.user!.organizationId },
   });
-  if (!existing) {
+  if (!existing || !canAccessWorkflowDelete(req.user!, existing)) {
     res.status(404).json({ error: "Workflow not found" });
     return;
   }
@@ -166,11 +270,18 @@ workflowsRouter.delete("/:id", async (req: AuthedRequest, res) => {
 });
 
 workflowsRouter.post("/:id/publish", async (req: AuthedRequest, res) => {
+  const user = req.user!;
+  const member = toMemberContext(user);
+  if (!hasPermission(member, "workflows.publish")) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
   const id = routeParam(req.params.id);
   const wf = await prisma.workflow.findFirst({
-    where: { id, userId: req.user!.id },
+    where: { id, organizationId: user.organizationId },
   });
-  if (!wf) {
+  if (!wf || !canAccessWorkflowRead(user, wf)) {
     res.status(404).json({ error: "Workflow not found" });
     return;
   }
@@ -197,7 +308,7 @@ workflowsRouter.post("/:id/publish", async (req: AuthedRequest, res) => {
         workflowId: wf.id,
         versionNumber,
         snapshot: asJson(snapshot),
-        publishedBy: req.user!.id,
+        publishedBy: user.id,
       },
     });
     await tx.workflow.update({
@@ -220,9 +331,9 @@ workflowsRouter.post("/:id/publish", async (req: AuthedRequest, res) => {
 workflowsRouter.get("/:id/versions", async (req: AuthedRequest, res) => {
   const id = routeParam(req.params.id);
   const wf = await prisma.workflow.findFirst({
-    where: { id, userId: req.user!.id },
+    where: { id, organizationId: req.user!.organizationId },
   });
-  if (!wf) {
+  if (!wf || !canAccessWorkflowRead(req.user!, wf)) {
     res.status(404).json({ error: "Workflow not found" });
     return;
   }

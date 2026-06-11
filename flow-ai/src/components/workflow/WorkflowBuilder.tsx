@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   BackgroundVariant,
@@ -28,9 +28,11 @@ import {
   ClipboardPaste,
   HelpCircle,
   FileText,
+  Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { SettingsSheet } from "@/components/settings/SettingsSheet";
 import { Sidebar } from "./Sidebar";
 import { TopHeader } from "./TopHeader";
 import { PropertiesPanel } from "./PropertiesPanel";
@@ -42,6 +44,7 @@ import { EndNode } from "./nodes/EndNode";
 import { ConversationNode } from "./nodes/ConversationNode";
 import { QaNode } from "./nodes/QaNode";
 import { UserInputNode } from "./nodes/UserInputNode";
+import { ReactNode } from "./nodes/ReactNode";
 import {
   canTestWorkflow,
   DEFAULT_SILENCE_TIMEOUT_SEC,
@@ -50,15 +53,18 @@ import {
   type WorkflowTools,
 } from "./types";
 import { createInitialEdges, createInitialNodes } from "./initialFlow";
-import { getAccessToken } from "@/lib/api/client";
+import { ApiError, getAccessToken } from "@/lib/api/client";
 import { createVoiceSession } from "@/lib/api/voice.functions";
 import {
+  acquireWorkflowLock,
   createWorkflow as createWorkflowApi,
   deleteWorkflow as deleteWorkflowApi,
   getWorkflow,
   listWorkflows,
   publishWorkflow,
+  releaseWorkflowLock,
   updateWorkflow,
+  type WorkflowRecord,
 } from "@/lib/api/workflows";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { graphHasQaBlock, workflowToPrompt } from "@/lib/workflow-to-prompt";
@@ -80,6 +86,7 @@ const nodeTypes = {
   conversation: ConversationNode,
   qa: QaNode,
   userInput: UserInputNode,
+  react: ReactNode,
 };
 
 type Workflow = {
@@ -91,6 +98,8 @@ type Workflow = {
   context: string;
   status: string;
   updatedAt: number;
+  createdByUserId: string;
+  createdByName: string;
 };
 
 const marker = { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "#3f3f46" } as const;
@@ -104,6 +113,7 @@ function apiToWorkflow(w: {
   context: string;
   status: string;
   updatedAt: number;
+  createdBy?: { id: string; name: string };
 }): Workflow {
   return {
     id: w.id,
@@ -114,6 +124,8 @@ function apiToWorkflow(w: {
     context: w.context,
     status: w.status,
     updatedAt: w.updatedAt,
+    createdByUserId: w.createdBy?.id ?? "",
+    createdByName: w.createdBy?.name ?? "",
   };
 }
 
@@ -165,7 +177,7 @@ function isTypingTarget(target: EventTarget | null) {
 }
 
 function Inner() {
-  const { logout } = useAuth();
+  const { user, logout, hasPermission } = useAuth();
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [loadingWorkflows, setLoadingWorkflows] = useState(true);
@@ -178,6 +190,10 @@ function Inner() {
   const [contextOpen, setContextOpen] = useState(false);
   const [clipboard, setClipboard] = useState<BlockClipboard>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hasEditLock, setHasEditLock] = useState(false);
+  const [lockedByName, setLockedByName] = useState<string | null>(null);
+  const hasEditLockRef = useRef(false);
 
   const { fitView, getNode, setCenter } = useReactFlow();
 
@@ -195,24 +211,112 @@ function Inner() {
   const tools = active?.tools ?? defaultWorkflowTools();
   const workflowContext = active?.context ?? "";
 
+  const isOwnWorkflow = !!active && !!user && active.createdByUserId === user.id;
+  const baseCanEditActive =
+    !!active &&
+    (isOwnWorkflow
+      ? hasPermission("workflows.edit_own")
+      : hasPermission("workflows.edit_all"));
+  const canEditActive = baseCanEditActive && hasEditLock;
+  const canPublishActive = canEditActive && hasPermission("workflows.publish");
+  const canTestActive = hasPermission("workflows.test");
+  const canCreateWorkflow = hasPermission("workflows.create");
+  const canDeleteOwn = hasPermission("workflows.delete");
+  const showCreatorInSidebar = hasPermission("workflows.view_all");
+
   const updateActive = useCallback(
     (updater: (w: Workflow) => Workflow) => {
-      setWorkflows((ws) =>
-        ws.map((w) => (w.id === activeId ? { ...updater(w), updatedAt: Date.now() } : w)),
-      );
+      setWorkflows((ws) => ws.map((w) => (w.id === activeId ? updater(w) : w)));
     },
     [activeId],
   );
+
+  const applyServerWorkflow = useCallback((record: WorkflowRecord) => {
+    const wf = apiToWorkflow(record);
+    setWorkflows((ws) => ws.map((w) => (w.id === wf.id ? wf : w)));
+    return wf;
+  }, []);
+
+  useEffect(() => {
+    hasEditLockRef.current = hasEditLock;
+  }, [hasEditLock]);
+
+  useEffect(() => {
+    if (!activeId || !user || loadingWorkflows || !baseCanEditActive) {
+      setHasEditLock(false);
+      setLockedByName(null);
+      return;
+    }
+
+    let cancelled = false;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+    (async () => {
+      try {
+        await acquireWorkflowLock(activeId);
+        if (cancelled) {
+          await releaseWorkflowLock(activeId).catch(() => {});
+          return;
+        }
+        setHasEditLock(true);
+        setLockedByName(null);
+        heartbeat = setInterval(() => {
+          acquireWorkflowLock(activeId).catch(() => {});
+        }, 30_000);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 423) {
+          const body = err.body as { lock?: { userName: string } };
+          setHasEditLock(false);
+          setLockedByName(body.lock?.userName ?? "Another user");
+          try {
+            const { workflow } = await getWorkflow(activeId);
+            if (!cancelled) applyServerWorkflow(workflow);
+          } catch {
+            /* ignore refresh failure */
+          }
+        } else {
+          setHasEditLock(false);
+          setLockedByName(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (heartbeat) clearInterval(heartbeat);
+      releaseWorkflowLock(activeId).catch(() => {});
+      setHasEditLock(false);
+    };
+  }, [activeId, user?.id, loadingWorkflows, baseCanEditActive, applyServerWorkflow]);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      if (!activeId || !hasEditLockRef.current) return;
+      const token = getAccessToken();
+      const base = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+      fetch(`${base}/api/workflows/${activeId}/lock`, {
+        method: "DELETE",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "include",
+        keepalive: true,
+      }).catch(() => {});
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [activeId]);
 
   useEffect(() => {
     (async () => {
       try {
         const { workflows: list } = await listWorkflows();
-        if (list.length === 0) {
+        if (list.length === 0 && hasPermission("workflows.create")) {
           const { workflow } = await createWorkflowApi();
           const wf = apiToWorkflow(workflow);
           setWorkflows([wf]);
           setActiveId(wf.id);
+        } else if (list.length === 0) {
+          setWorkflows([]);
+          setActiveId(null);
         } else {
           const loaded = await Promise.all(
             list.map(async (s) => {
@@ -234,8 +338,9 @@ function Inner() {
   }, []);
 
   useEffect(() => {
-    if (!active || loadingWorkflows) return;
+    if (!active || loadingWorkflows || !canEditActive) return;
 
+    const serverUpdatedAt = active.updatedAt;
     const timer = setTimeout(async () => {
       setSaving(true);
       try {
@@ -245,18 +350,33 @@ function Inner() {
           tools: active.tools,
           nodes: active.nodes,
           edges: active.edges,
+          expectedUpdatedAt: serverUpdatedAt,
         });
         setWorkflows((ws) =>
           ws.map((w) =>
             w.id === workflow.id
-              ? { ...w, updatedAt: workflow.updatedAt, status: workflow.status }
+              ? {
+                  ...w,
+                  updatedAt: workflow.updatedAt,
+                  status: workflow.status,
+                }
               : w,
           ),
         );
       } catch (err) {
-        toast.error("Auto-save failed", {
-          description: err instanceof Error ? err.message : "Could not save workflow",
-        });
+        if (err instanceof ApiError && err.status === 409) {
+          const body = err.body as { workflow?: WorkflowRecord };
+          if (body.workflow) {
+            applyServerWorkflow(body.workflow);
+          }
+          toast.error("Workflow was modified by another user", {
+            description: "Your changes were discarded. Reloaded the latest version.",
+          });
+        } else {
+          toast.error("Auto-save failed", {
+            description: err instanceof Error ? err.message : "Could not save workflow",
+          });
+        }
       } finally {
         setSaving(false);
       }
@@ -271,6 +391,8 @@ function Inner() {
     active?.nodes,
     active?.edges,
     loadingWorkflows,
+    canEditActive,
+    applyServerWorkflow,
   ]);
 
   const setNodes = useCallback(
@@ -305,7 +427,7 @@ function Inner() {
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
-      if (!active) return;
+      if (!active || !canEditActive) return;
       const remove = changes.find((c) => c.type === "remove");
       if (remove && "id" in remove) {
         const node = nodes.find((n) => n.id === remove.id);
@@ -317,12 +439,12 @@ function Inner() {
       }
       setNodes((nds) => applyNodeChanges(changes, nds));
     },
-    [active, nodes, setNodes],
+    [active, canEditActive, nodes, setNodes],
   );
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
-      if (!active) return;
+      if (!active || !canEditActive) return;
       const remove = changes.find((c) => c.type === "remove");
       if (remove && "id" in remove) {
         setPendingDelete({ kind: "edge", id: remove.id });
@@ -332,11 +454,12 @@ function Inner() {
       }
       setEdges((eds) => applyEdgeChanges(changes, eds));
     },
-    [active, setEdges],
+    [active, canEditActive, setEdges],
   );
 
   const onConnect = useCallback(
     (params: Connection) => {
+      if (!canEditActive) return;
       setEdges((eds) => {
         const cleaned = eds.filter(
           (e) =>
@@ -348,7 +471,7 @@ function Inner() {
         return addEdge({ ...params, type: "smoothstep", markerEnd: marker }, cleaned);
       });
     },
-    [setEdges],
+    [canEditActive, setEdges],
   );
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
@@ -397,6 +520,10 @@ function Inner() {
   );
 
   const createWorkflow = useCallback(async () => {
+    if (!canCreateWorkflow) {
+      toast.error("You do not have permission to create workflows");
+      return;
+    }
     try {
       const { workflow } = await createWorkflowApi({
         name: `Workflow ${workflows.length + 1}`,
@@ -481,9 +608,32 @@ function Inner() {
       type: "userInput",
       position: { x: 520 + Math.random() * 80, y: 240 + Math.random() * 80 },
       data: {
-        title: "User Input",
+        title: "LLM",
         instruction: "Check context and tell the user all relevant details.",
         waitForResponse: true,
+        responses: [],
+        notes: "",
+        silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
+      },
+    };
+    setNodes((nds) => [...nds, newNode]);
+    setSelectedId(id);
+  }, [active, setNodes]);
+
+  const addReactNode = useCallback(() => {
+    if (!active) return;
+    const id = `react-${Date.now()}`;
+    const newNode: Node<NodeData> = {
+      id,
+      type: "react",
+      position: { x: 520 + Math.random() * 80, y: 320 + Math.random() * 80 },
+      data: {
+        title: "React",
+        instruction: "Check the caller's last reply using context.",
+        replyGuide:
+          "If anything is missing, tell the user we have noted it and will add it to the list. Name the item. Be short.",
+        waitForResponse: true,
+        responses: [],
         notes: "",
         silenceTimeoutSec: DEFAULT_SILENCE_TIMEOUT_SEC,
       },
@@ -715,18 +865,33 @@ function Inner() {
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-        workflows={workflows.map((w) => ({ id: w.id, name: w.name, updatedAt: w.updatedAt }))}
+        workflows={workflows.map((w) => ({
+          id: w.id,
+          name: w.name,
+          updatedAt: w.updatedAt,
+          createdByUserId: w.createdByUserId,
+          createdByName: w.createdByName,
+        }))}
         activeId={activeId}
         onSelect={selectWorkflow}
         onCreate={createWorkflow}
         onDelete={requestDeleteWorkflow}
+        canCreate={canCreateWorkflow}
+        canDeleteOwn={canDeleteOwn}
+        currentUserId={user?.id}
+        showCreator={showCreatorInSidebar}
+        showDashboardLink={hasPermission("dashboard.access")}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <TopHeader
           title={active?.name ?? "No workflow selected"}
           status={active?.status ?? "draft"}
-          canEdit={!!active}
+          canEdit={canEditActive}
+          canTest={canTestActive}
+          canPublish={canPublishActive}
+          lockedByName={lockedByName}
           tools={tools}
           hasContext={workflowContext.trim().length > 0}
           saving={saving}
@@ -787,6 +952,7 @@ function Inner() {
                       if (n.type === "end") return "#a1a1aa";
                       if (n.type === "qa") return "#ede9fe";
                       if (n.type === "userInput") return "#fef3c7";
+                      if (n.type === "react") return "#e0f2fe";
                       return "#ffffff";
                     }}
                     nodeStrokeColor="#27272a"
@@ -807,6 +973,7 @@ function Inner() {
                 <BlockPalette
                   onAddConversation={addConversationNode}
                   onAddUserInput={addUserInputNode}
+                  onAddReact={addReactNode}
                   onAddQa={addQaNode}
                   onAddEnd={addEndNode}
                 />
@@ -829,10 +996,11 @@ function Inner() {
               <PropertiesPanel
                 key={selectedNode.id}
                 node={selectedNode}
+                readOnly={!canEditActive}
                 onChange={(data) => updateNodeData(selectedNode.id, () => data)}
                 onClose={() => setSelectedId(null)}
                 onDelete={
-                  selectedNode.type === "start"
+                  !canEditActive || selectedNode.type === "start"
                     ? undefined
                     : () => setPendingDelete({ kind: "node", id: selectedNode.id })
                 }
@@ -893,6 +1061,8 @@ function Inner() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <SettingsSheet open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }
@@ -989,11 +1159,13 @@ function EmptyCanvas({ onCreate }: { onCreate: () => void }) {
 function BlockPalette({
   onAddConversation,
   onAddUserInput,
+  onAddReact,
   onAddQa,
   onAddEnd,
 }: {
   onAddConversation: () => void;
   onAddUserInput: () => void;
+  onAddReact: () => void;
   onAddQa: () => void;
   onAddEnd: () => void;
 }) {
@@ -1004,7 +1176,8 @@ function BlockPalette({
       className="absolute left-4 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-1.5 rounded-2xl border border-border bg-white/95 p-1.5 shadow-[0_4px_18px_-8px_rgba(0,0,0,0.15)] backdrop-blur"
     >
       <PaletteButton icon={MessageSquareText} label="Conversation" onClick={onAddConversation} />
-      <PaletteButton icon={FileText} label="User Input" onClick={onAddUserInput} />
+      <PaletteButton icon={FileText} label="LLM" onClick={onAddUserInput} />
+      <PaletteButton icon={Sparkles} label="React" onClick={onAddReact} />
       <PaletteButton icon={HelpCircle} label="Q&A" onClick={onAddQa} />
       <div className="my-0.5 h-px bg-border" />
       <PaletteButton icon={Square} label="End" onClick={onAddEnd} />

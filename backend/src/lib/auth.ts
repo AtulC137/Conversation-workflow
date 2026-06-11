@@ -1,6 +1,8 @@
 import bcrypt from "bcryptjs";
 import crypto from "node:crypto";
 import jwt, { type SignOptions } from "jsonwebtoken";
+import type { OrganizationRole } from "@prisma/client";
+import type { PermissionsMap } from "./permissions.js";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-jwt-secret-change-in-production";
 const JWT_ACCESS_EXPIRES = process.env.JWT_ACCESS_EXPIRES ?? "15m";
@@ -10,6 +12,10 @@ export type AccessTokenPayload = {
   sub: string;
   email: string;
   name: string;
+  organizationId: string;
+  organizationSlug: string;
+  role: OrganizationRole;
+  permissions: PermissionsMap;
 };
 
 export function hashPassword(password: string): Promise<string> {

@@ -14,58 +14,100 @@ import {
   logoutUser,
   registerUser,
   refreshAccessToken,
-  type ApiUser,
+  type AuthSession,
+  type RegisterPayload,
 } from "@/lib/api/client";
+import { hasPermission, type PermissionKey } from "@/lib/permissions";
 
 type AuthState = {
-  user: ApiUser | null;
+  user: AuthSession["user"] | null;
+  organization: AuthSession["organization"] | null;
+  role: AuthSession["role"] | null;
+  permissions: AuthSession["permissions"] | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, name: string) => Promise<void>;
+  login: (organizationSlug: string, email: string, password: string) => Promise<void>;
+  register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
+  hasPermission: (key: PermissionKey) => boolean;
+  refreshSession: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<ApiUser | null>(null);
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const loadSession = useCallback(async () => {
+    if (!getAccessToken()) {
+      await refreshAccessToken();
+    }
+    if (getAccessToken()) {
+      try {
+        const me = await fetchMe();
+        setSession(me);
+        return;
+      } catch {
+        setSession(null);
+      }
+    } else {
+      setSession(null);
+    }
+  }, []);
+
   useEffect(() => {
-    (async () => {
-      if (!getAccessToken()) {
-        await refreshAccessToken();
-      }
+    loadSession().finally(() => setLoading(false));
+  }, [loadSession]);
+
+  useEffect(() => {
+    const onFocus = () => {
       if (getAccessToken()) {
-        try {
-          const { user: me } = await fetchMe();
-          setUser(me);
-        } catch {
-          setUser(null);
-        }
+        fetchMe()
+          .then(setSession)
+          .catch(() => {});
       }
-      setLoading(false);
-    })();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const { user: u } = await loginUser(email, password);
-    setUser(u);
+  const login = useCallback(async (organizationSlug: string, email: string, password: string) => {
+    const s = await loginUser(organizationSlug, email, password);
+    setSession(s);
   }, []);
 
-  const register = useCallback(async (email: string, password: string, name: string) => {
-    const { user: u } = await registerUser(email, password, name);
-    setUser(u);
+  const register = useCallback(async (payload: RegisterPayload) => {
+    const s = await registerUser(payload);
+    setSession(s);
   }, []);
 
   const logout = useCallback(async () => {
     await logoutUser();
-    setUser(null);
+    setSession(null);
   }, []);
 
+  const checkPermission = useCallback(
+    (key: PermissionKey) => {
+      if (!session) return false;
+      return hasPermission(session.role, session.permissions, key);
+    },
+    [session],
+  );
+
   const value = useMemo(
-    () => ({ user, loading, login, register, logout }),
-    [user, loading, login, register, logout],
+    () => ({
+      user: session?.user ?? null,
+      organization: session?.organization ?? null,
+      role: session?.role ?? null,
+      permissions: session?.permissions ?? null,
+      loading,
+      login,
+      register,
+      logout,
+      hasPermission: checkPermission,
+      refreshSession: loadSession,
+    }),
+    [session, loading, login, register, logout, checkPermission, loadSession],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

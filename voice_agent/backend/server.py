@@ -130,6 +130,8 @@ async def audio_ws(websocket: WebSocket):
     _prewarm_task: asyncio.Task | None = None
     _silence_timer_task: asyncio.Task | None = None
     _caller_listening: bool = False
+    _pending_react_transcript: str | None = None
+    _pending_react_prior_message: str | None = None
 
     tts_session = TtsWsSession()
 
@@ -245,6 +247,11 @@ async def audio_ws(websocket: WebSocket):
             "silence_timeout",
             node_id=source_id,
             payload={"via": via, "nextNodeId": next_id, "timeoutSec": timeout},
+        )
+        _set_pending_react(
+            next_id,
+            "[No response]",
+            workflow_runner.get_message(source_id),
         )
         await _speak_entered_node(next_id, _turn_cancel)
 
@@ -387,11 +394,34 @@ async def audio_ws(websocket: WebSocket):
             await _send({"type": "farewell_start"})
             await _end_session()
 
+    def _set_pending_react(target_id: str, transcript: str, prior_message: str):
+        nonlocal _pending_react_transcript, _pending_react_prior_message
+        if workflow_runner.is_react_node(target_id):
+            _pending_react_transcript = transcript
+            _pending_react_prior_message = prior_message or ""
+        else:
+            _pending_react_transcript = None
+            _pending_react_prior_message = None
+
     async def _speak_entered_node(target_id: str, cancel: asyncio.Event):
+        nonlocal _pending_react_transcript, _pending_react_prior_message
         workflow_runner.current_node_id = target_id
 
         if workflow_runner.is_end_node(target_id):
             await _end_session()
+            return
+
+        if workflow_runner.is_react_node(target_id):
+            react_transcript = _pending_react_transcript or "[No response]"
+            react_prior = _pending_react_prior_message or ""
+            _pending_react_transcript = None
+            _pending_react_prior_message = None
+            await _run_context_react(cancel, target_id, react_transcript, react_prior)
+            if not workflow_runner.get_wait_for_response(target_id):
+                next_id = workflow_runner.advance_via_out_edge()
+                if next_id:
+                    logger.info(f"[WORKFLOW] react auto-advance → node={next_id}")
+                    await _speak_entered_node(next_id, cancel)
             return
 
         if workflow_runner.is_user_input_node(target_id):
@@ -410,16 +440,19 @@ async def audio_ws(websocket: WebSocket):
         if message:
             await _speak_scripted(message, _current_tts_lang, cancel, hangup_after)
 
-    async def _advance_via_out_and_speak(cancel: asyncio.Event):
+    async def _advance_via_out_and_speak(cancel: asyncio.Event, transcript: str = "[Acknowledged]"):
         source_id = workflow_runner.current_node_id
+        prior_message = workflow_runner.get_message(source_id)
         next_id = workflow_runner.advance_via_out_edge()
         if not next_id:
             return
         logger.info(f"[WORKFLOW] ai-out from node={source_id} → node={next_id}")
+        _set_pending_react(next_id, transcript, prior_message)
         await _speak_entered_node(next_id, cancel)
 
-    async def _advance_and_speak(branch_id: str, cancel: asyncio.Event):
+    async def _advance_and_speak(branch_id: str, cancel: asyncio.Event, transcript: str = ""):
         source_id = workflow_runner.current_node_id
+        prior_message = workflow_runner.get_message(source_id)
         no_questions_branch = (
             workflow_runner.is_qa_node(source_id)
             and branch_id == workflow_runner.find_no_questions_branch(source_id)
@@ -438,6 +471,7 @@ async def audio_ws(websocket: WebSocket):
             node_id=workflow_runner.current_node_id,
             payload={"branchId": branch_id, "targetId": target_id},
         )
+        _set_pending_react(target_id, transcript, prior_message)
         await _speak_entered_node(target_id, cancel)
 
     async def _run_context_tell(cancel: asyncio.Event, target_id: str | None = None):
@@ -463,6 +497,43 @@ async def audio_ws(websocket: WebSocket):
                 stt_lang=None,
                 on_language_retry=on_language_retry,
                 node_id=node_id,
+            )
+        except asyncio.CancelledError:
+            _tts_streaming = False
+        except Exception as e:
+            logger.error(f"[TURN ERROR] {e}")
+
+    async def _run_context_react(
+        cancel: asyncio.Event,
+        target_id: str,
+        transcript: str,
+        prior_message: str,
+    ):
+        instruction = workflow_runner.get_instruction(target_id)
+        if not instruction:
+            instruction = "Respond to the caller using the facts and their last message."
+        reply_guide = workflow_runner.get_reply_guide(target_id)
+
+        async def on_language_retry():
+            nonlocal _tts_aborted_for_retry, _tts_streaming
+            _tts_aborted_for_retry = True
+            _tts_streaming = False
+            await tts_session.abort()
+            _schedule_tts_prewarm(_current_tts_lang, after_abort=True)
+
+        try:
+            await llm_module.stream_context_react(
+                transcript=transcript,
+                context=base_context,
+                instruction=instruction,
+                node_title=workflow_runner.get_title(target_id),
+                prior_message=prior_message,
+                event_callback=on_event,
+                cancel_event=cancel,
+                stt_lang=None,
+                on_language_retry=on_language_retry,
+                node_id=target_id,
+                reply_guide=reply_guide,
             )
         except asyncio.CancelledError:
             _tts_streaming = False
@@ -503,6 +574,19 @@ async def audio_ws(websocket: WebSocket):
             _tts_streaming = False
         except Exception as e:
             logger.error(f"[TURN ERROR] {e}")
+
+    async def _answer_off_script(
+        transcript: str,
+        cancel: asyncio.Event,
+        stt_lang: str | None,
+        hint: str,
+        via: str,
+    ):
+        logger.info(
+            f"[OFF_SCRIPT] {via} node={workflow_runner.current_node_id} "
+            f"transcript={transcript!r}"
+        )
+        await _run_context_qa(transcript, cancel, stt_lang, hint)
 
     async def on_event(
         event_type: str,
@@ -659,21 +743,93 @@ async def audio_ws(websocket: WebSocket):
 
             if workflow_runner.is_user_input_node() and node:
                 instruction = workflow_runner.get_instruction() or node_message
+                if branches:
+                    if llm_module.looks_like_acknowledgment(transcript):
+                        continue_id = llm_module.find_continue_branch(branches)
+                        if continue_id:
+                            logger.info(
+                                f"[ACK] userInput node={workflow_runner.current_node_id} "
+                                f"transcript={transcript!r} branch={continue_id}"
+                            )
+                            await _advance_and_speak(continue_id, cancel, transcript)
+                            return
+
+                    if llm_module.looks_like_factual_question(transcript):
+                        await _run_context_qa(transcript, cancel, stt_lang, instruction)
+                        return
+
+                    branch_id = await llm_module.classify_branch(
+                        transcript, branches, instruction
+                    )
+                    if branch_id:
+                        await _advance_and_speak(branch_id, cancel, transcript)
+                        return
+
+                    await _answer_off_script(
+                        transcript, cancel, stt_lang, instruction, "userInput"
+                    )
+                    return
+
                 if llm_module.looks_like_acknowledgment(transcript):
                     logger.info(
                         f"[ACK] userInput node={workflow_runner.current_node_id} "
                         f"transcript={transcript!r}"
                     )
-                    await _advance_via_out_and_speak(cancel)
+                    await _advance_via_out_and_speak(cancel, transcript)
                     return
 
                 if llm_module.looks_like_factual_question(transcript):
                     await _run_context_qa(transcript, cancel, stt_lang, instruction)
                     return
 
-                logger.info(
-                    f"[UNHANDLED] node={workflow_runner.current_node_id} "
-                    f"transcript={transcript!r}"
+                await _answer_off_script(
+                    transcript, cancel, stt_lang, instruction, "userInput"
+                )
+                return
+
+            if workflow_runner.is_react_node() and node:
+                instruction = workflow_runner.get_instruction() or node_message
+                if branches:
+                    if llm_module.looks_like_acknowledgment(transcript):
+                        continue_id = llm_module.find_continue_branch(branches)
+                        if continue_id:
+                            logger.info(
+                                f"[ACK] react node={workflow_runner.current_node_id} "
+                                f"transcript={transcript!r} branch={continue_id}"
+                            )
+                            await _advance_and_speak(continue_id, cancel, transcript)
+                            return
+
+                    if llm_module.looks_like_factual_question(transcript):
+                        await _run_context_qa(transcript, cancel, stt_lang, instruction)
+                        return
+
+                    branch_id = await llm_module.classify_branch(
+                        transcript, branches, instruction
+                    )
+                    if branch_id:
+                        await _advance_and_speak(branch_id, cancel, transcript)
+                        return
+
+                    await _answer_off_script(
+                        transcript, cancel, stt_lang, instruction, "react"
+                    )
+                    return
+
+                if llm_module.looks_like_acknowledgment(transcript):
+                    logger.info(
+                        f"[ACK] react node={workflow_runner.current_node_id} "
+                        f"transcript={transcript!r}"
+                    )
+                    await _advance_via_out_and_speak(cancel, transcript)
+                    return
+
+                if llm_module.looks_like_factual_question(transcript):
+                    await _run_context_qa(transcript, cancel, stt_lang, instruction)
+                    return
+
+                await _answer_off_script(
+                    transcript, cancel, stt_lang, instruction, "react"
                 )
                 return
 
@@ -685,7 +841,7 @@ async def audio_ws(websocket: WebSocket):
                             f"[ACK] node={workflow_runner.current_node_id} "
                             f"transcript={transcript!r} branch={continue_id}"
                         )
-                        await _advance_and_speak(continue_id, cancel)
+                        await _advance_and_speak(continue_id, cancel, transcript)
                         return
 
                 if llm_module.looks_like_factual_question(transcript):
@@ -694,12 +850,11 @@ async def audio_ws(websocket: WebSocket):
 
                 branch_id = await llm_module.classify_branch(transcript, branches, node_message)
                 if branch_id:
-                    await _advance_and_speak(branch_id, cancel)
+                    await _advance_and_speak(branch_id, cancel, transcript)
                     return
 
-                logger.info(
-                    f"[UNHANDLED] node={workflow_runner.current_node_id} "
-                    f"transcript={transcript!r}"
+                await _answer_off_script(
+                    transcript, cancel, stt_lang, node_message, "conversation"
                 )
                 return
 
@@ -720,7 +875,7 @@ async def audio_ws(websocket: WebSocket):
                             f"[QA] decline node={workflow_runner.current_node_id} "
                             f"transcript={transcript!r} branch={no_branch}"
                         )
-                        await _advance_and_speak(no_branch, cancel)
+                        await _advance_and_speak(no_branch, cancel, transcript)
                         return
 
                 if llm_module.looks_like_factual_question(transcript):
@@ -743,19 +898,18 @@ async def audio_ws(websocket: WebSocket):
                         transcript, branches, node_message
                     )
                     if branch_id:
-                        await _advance_and_speak(branch_id, cancel)
+                        await _advance_and_speak(branch_id, cancel, transcript)
                         return
 
-                logger.info(
-                    f"[UNHANDLED] node={workflow_runner.current_node_id} "
-                    f"transcript={transcript!r}"
+                await _answer_off_script(
+                    transcript, cancel, stt_lang, node_message, "qa"
                 )
                 return
 
             if branches and node:
                 branch_id = await llm_module.classify_branch(transcript, branches, node_message)
                 if branch_id:
-                    await _advance_and_speak(branch_id, cancel)
+                    await _advance_and_speak(branch_id, cancel, transcript)
                     return
 
             if node:

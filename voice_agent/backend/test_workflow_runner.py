@@ -81,6 +81,56 @@ class WorkflowRunnerNoResponseTests(unittest.TestCase):
         runner.current_node_id = "qa"
         self.assertIsNone(runner.find_no_response_target("qa"))
 
+    def test_user_input_node_with_responses_exposes_branches(self):
+        graph = _loan_graph()
+        graph["nodes"].append(
+            {
+                "id": "userinput-branched",
+                "type": "userInput",
+                "instruction": "Tell payment details.",
+                "waitForResponse": True,
+                "responses": [
+                    {"id": "ui-yes", "label": "understood"},
+                    {"id": "ui-question", "label": "has question"},
+                ],
+            }
+        )
+        runner = WorkflowRunner(graph)
+        runner.current_node_id = "userinput-branched"
+        branches = runner.get_branches("userinput-branched")
+        self.assertEqual(len(branches), 2)
+        self.assertTrue(runner._has_response_branches("userinput-branched"))
+        self.assertIsNone(runner.find_no_response_target("userinput-branched"))
+
+    def test_react_node_with_responses_exposes_branches(self):
+        graph = _loan_graph()
+        graph["nodes"].append(
+            {
+                "id": "react-fix",
+                "type": "react",
+                "instruction": "Compare list and reassure caller.",
+                "waitForResponse": True,
+                "responses": [
+                    {"id": "react-ok", "label": "ok"},
+                    {"id": "react-more", "label": "more questions"},
+                ],
+            }
+        )
+        graph["edges"].append(
+            {"source": "intro", "target": "react-fix", "sourceHandle": "intro-no"}
+        )
+        graph["edges"].append(
+            {"source": "react-fix", "target": "bye", "sourceHandle": NO_RESPONSE_HANDLE}
+        )
+        runner = WorkflowRunner(graph)
+        runner.current_node_id = "react-fix"
+        branches = runner.get_branches("react-fix")
+        self.assertEqual(len(branches), 2)
+        self.assertTrue(runner.is_react_node("react-fix"))
+        self.assertTrue(runner._has_response_branches("react-fix"))
+        self.assertTrue(runner.node_waits_for_caller("react-fix"))
+        self.assertEqual(runner.find_no_response_target("react-fix"), "bye")
+
 
 class WorkflowRunnerHangupTests(unittest.TestCase):
     def setUp(self):

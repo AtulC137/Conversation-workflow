@@ -8,13 +8,15 @@ export type WorkflowGraphNode = {
 
   id: string;
 
-  type: "start" | "conversation" | "qa" | "userInput" | "end";
+  type: "start" | "conversation" | "qa" | "userInput" | "react" | "end";
 
   title?: string;
 
   message?: string;
 
   instruction?: string;
+
+  replyGuide?: string;
 
   waitForResponse?: boolean;
 
@@ -218,21 +220,129 @@ function walkPath(
 
     lines.push(`AI [from context]: ${instruction}`);
 
-    const waitForResponse = node.data.waitForResponse !== false;
+    const responses = node.data.responses ?? [];
 
-    if (waitForResponse) {
+    if (responses.length === 0) {
 
-      lines.push("User (acknowledged):");
+      const waitForResponse = node.data.waitForResponse !== false;
+
+      if (waitForResponse) {
+
+        lines.push("User (acknowledged):");
+
+      }
+
+      const next = findNextNode(node.id, "ai-out", nodes, edges);
+
+      if (next) {
+
+        const branchVisited = waitForResponse ? new Set(visited) : visited;
+
+        walkPath(next.id, nodes, edges, lines, branchVisited);
+
+      }
+
+      return;
 
     }
 
-    const next = findNextNode(node.id, "ai-out", nodes, edges);
 
-    if (next) {
 
-      const branchVisited = waitForResponse ? new Set(visited) : visited;
+    for (const branch of responses) {
 
-      walkPath(next.id, nodes, edges, lines, branchVisited);
+      const branchLabel = branch.label.trim() || "Response";
+
+      const examples = (branch.examples ?? []).map((e) => e.trim()).filter(Boolean);
+
+      const exampleHint = examples.length > 0 ? ` — e.g. "${examples.join('", "')}"` : "";
+
+      lines.push(`User (${branchLabel})${exampleHint}:`);
+
+
+
+      const next = findNextNode(node.id, branch.id, nodes, edges);
+
+      if (next) {
+
+        const branchVisited = new Set(visited);
+
+        walkPath(next.id, nodes, edges, lines, branchVisited);
+
+      }
+
+    }
+
+    return;
+
+  }
+
+
+
+  if (node.type === "react") {
+
+    const instruction =
+
+      node.data.instruction?.trim() ||
+
+      "Respond to the caller's last reply using context and this instruction.";
+
+    lines.push(`AI [react to caller]: ${instruction}`);
+
+    const replyGuide = node.data.replyGuide?.trim();
+
+    if (replyGuide) {
+
+      lines.push(`AI [react]: (reply) ${replyGuide}`);
+
+    }
+
+    lines.push("User (previous reply): …");
+
+    const responses = node.data.responses ?? [];
+
+    if (responses.length === 0) {
+
+      const waitForResponse = node.data.waitForResponse !== false;
+
+      if (waitForResponse) {
+
+        lines.push("User (acknowledged):");
+
+      }
+
+      const next = findNextNode(node.id, "ai-out", nodes, edges);
+
+      if (next) {
+
+        const branchVisited = waitForResponse ? new Set(visited) : visited;
+
+        walkPath(next.id, nodes, edges, lines, branchVisited);
+
+      }
+
+      return;
+
+    }
+
+    for (const branch of responses) {
+
+      const branchLabel = branch.label.trim() || "Response";
+
+      const examples = (branch.examples ?? []).map((e) => e.trim()).filter(Boolean);
+
+      const exampleHint = examples.length > 0 ? ` — e.g. "${examples.join('", "')}"` : "";
+
+      lines.push(`User (${branchLabel})${exampleHint}:`);
+
+      const next = findNextNode(node.id, branch.id, nodes, edges);
+
+      if (next) {
+
+        const branchVisited = new Set(visited);
+
+        walkPath(next.id, nodes, edges, lines, branchVisited);
+
+      }
 
     }
 
@@ -340,6 +450,7 @@ export function serializeWorkflowGraph(
         n.type === "conversation" ||
         n.type === "qa" ||
         n.type === "userInput" ||
+        n.type === "react" ||
         n.type === "end",
     )
 
@@ -408,6 +519,48 @@ export function serializeWorkflowGraph(
           instruction: n.data.instruction,
 
           waitForResponse: n.data.waitForResponse,
+
+          responses: (n.data.responses ?? []).map((r) => ({
+
+            id: r.id,
+
+            label: r.label,
+
+            examples: r.examples?.filter(Boolean),
+
+          })),
+
+          silenceTimeoutSec: n.data.silenceTimeoutSec,
+
+        };
+
+      }
+
+      if (n.type === "react") {
+
+        return {
+
+          id: n.id,
+
+          type: "react" as const,
+
+          title: n.data.title,
+
+          instruction: n.data.instruction,
+
+          replyGuide: n.data.replyGuide,
+
+          waitForResponse: n.data.waitForResponse,
+
+          responses: (n.data.responses ?? []).map((r) => ({
+
+            id: r.id,
+
+            label: r.label,
+
+            examples: r.examples?.filter(Boolean),
+
+          })),
 
           silenceTimeoutSec: n.data.silenceTimeoutSec,
 

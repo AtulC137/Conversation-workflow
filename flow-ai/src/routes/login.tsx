@@ -9,6 +9,7 @@ export const Route = createFileRoute("/login")({
 function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [organizationSlug, setOrganizationSlug] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -19,7 +20,7 @@ function LoginPage() {
     setError("");
     setSubmitting(true);
     try {
-      await login(email, password);
+      await login(organizationSlug.trim().toLowerCase(), email, password);
       navigate({ to: "/" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -35,11 +36,23 @@ function LoginPage() {
         className="w-full max-w-sm rounded-xl border border-border bg-white p-6 shadow-sm"
       >
         <h1 className="text-lg font-semibold">Sign in</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Access your workflows</p>
+        <p className="mt-1 text-sm text-muted-foreground">Access your organization workflows</p>
 
         {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
 
         <label className="mt-4 block text-sm font-medium">
+          Organization
+          <input
+            type="text"
+            required
+            placeholder="acme-bank"
+            value={organizationSlug}
+            onChange={(e) => setOrganizationSlug(e.target.value)}
+            className="mt-1 w-full rounded-md border border-border px-3 py-2 text-sm"
+          />
+        </label>
+
+        <label className="mt-3 block text-sm font-medium">
           Email
           <input
             type="email"

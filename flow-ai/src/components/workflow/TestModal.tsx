@@ -47,7 +47,7 @@ export function TestModal({ open, nodes, edges, tools, onClose }: Props) {
   }, []);
 
   const advanceFrom = useCallback(
-    (nodeId: string) => {
+    (nodeId: string, reactCallerText?: string) => {
       let node = nodes.find((n) => n.id === nodeId) ?? null;
 
       while (node) {
@@ -71,8 +71,49 @@ export function TestModal({ open, nodes, edges, tools, onClose }: Props) {
 
           const waitForResponse = node.data.waitForResponse !== false;
           if (waitForResponse) {
+            const responses = node.data.responses ?? [];
             setCurrentNodeId(node.id);
-            setBranchOptions([{ id: "ai-out", label: "okay", examples: ["okay"] }]);
+            setBranchOptions(
+              responses.length > 0
+                ? responses
+                : [{ id: "ai-out", label: "okay", examples: ["okay"] }],
+            );
+            return;
+          }
+
+          const next = findNextNode(node.id, "ai-out", nodes, edges);
+          if (!next) {
+            setFinished(true);
+            return;
+          }
+          node = next;
+          continue;
+        }
+
+        if (node.type === "react") {
+          const instruction =
+            node.data.instruction?.trim() ||
+            "Respond to the caller's last reply using context and this instruction.";
+          const replyGuide = node.data.replyGuide?.trim();
+          const callerSaid = reactCallerText ?? "(no prior reply)";
+          const replyPart = replyGuide ? ` — Reply: ${replyGuide}` : "";
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "ai",
+              text: `[Reacts to "${callerSaid}"${replyPart}]`,
+            },
+          ]);
+
+          const waitForResponse = node.data.waitForResponse !== false;
+          if (waitForResponse) {
+            const responses = node.data.responses ?? [];
+            setCurrentNodeId(node.id);
+            setBranchOptions(
+              responses.length > 0
+                ? responses
+                : [{ id: "ai-out", label: "okay", examples: ["okay"] }],
+            );
             return;
           }
 
@@ -132,15 +173,17 @@ export function TestModal({ open, nodes, edges, tools, onClose }: Props) {
       setBranchOptions([]);
       setCurrentNodeId(null);
 
+      const currentType = nodes.find((n) => n.id === currentNodeId)?.type;
       const handle =
         currentNodeId &&
-        nodes.find((n) => n.id === currentNodeId)?.type === "userInput" &&
+        (currentType === "userInput" || currentType === "react") &&
         branch.id === "ai-out"
           ? "ai-out"
           : branch.id;
       const next = findNextNode(currentNodeId!, handle, nodes, edges);
+      const userText = branch.label.trim() || "Response";
       if (next) {
-        advanceFrom(next.id);
+        advanceFrom(next.id, next.type === "react" ? userText : undefined);
       } else {
         setFinished(true);
       }

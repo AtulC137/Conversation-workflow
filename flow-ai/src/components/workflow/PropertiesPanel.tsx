@@ -5,12 +5,13 @@ import { DEFAULT_SILENCE_TIMEOUT_SEC, type NodeData } from "./types";
 
 type Props = {
   node: Node<NodeData>;
+  readOnly?: boolean;
   onChange: (data: NodeData) => void;
   onClose: () => void;
   onDelete?: () => void;
 };
 
-export function PropertiesPanel({ node, onChange, onClose, onDelete }: Props) {
+export function PropertiesPanel({ node, readOnly = false, onChange, onClose, onDelete }: Props) {
   const data = node.data;
   const displayTitle =
     data.title?.trim() ||
@@ -19,7 +20,9 @@ export function PropertiesPanel({ node, onChange, onClose, onDelete }: Props) {
       : node.type === "qa"
         ? "Q&A"
         : node.type === "userInput"
-          ? "User Input"
+          ? "LLM"
+          : node.type === "react"
+            ? "React"
           : node.type === "end"
             ? "End"
             : "Properties");
@@ -35,7 +38,7 @@ export function PropertiesPanel({ node, onChange, onClose, onDelete }: Props) {
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div>
           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            {node.type} block
+            {node.type === "userInput" ? "llm" : node.type === "react" ? "react" : node.type} block
           </div>
           <div className="text-sm font-semibold">{displayTitle}</div>
         </div>
@@ -65,19 +68,20 @@ export function PropertiesPanel({ node, onChange, onClose, onDelete }: Props) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <fieldset disabled={readOnly} className="flex-1 overflow-y-auto px-4 py-4 disabled:opacity-80">
         {node.type === "conversation" && (
           <ConversationForm data={data} onChange={onChange} />
         )}
         {node.type === "qa" && <QaForm data={data} onChange={onChange} />}
         {node.type === "userInput" && <UserInputForm data={data} onChange={onChange} />}
+        {node.type === "react" && <ReactForm data={data} onChange={onChange} />}
         {node.type === "end" && <EndForm data={data} onChange={onChange} />}
         {node.type === "start" && (
           <Field label="Trigger">
             <p className="text-xs text-muted-foreground">Workflow entry point. No configuration needed.</p>
           </Field>
         )}
-      </div>
+      </fieldset>
     </motion.aside>
   );
 }
@@ -140,6 +144,77 @@ function ConversationForm({ data, onChange }: { data: NodeData; onChange: (d: No
   );
 }
 
+function ReactForm({ data, onChange }: { data: NodeData; onChange: (d: NodeData) => void }) {
+  return (
+    <div className="space-y-5">
+      <p className="text-xs text-muted-foreground">
+        Runs when reached from a previous block. Uses the caller&apos;s last reply (or no-response)
+        plus workflow Context.
+      </p>
+      <Field label="Block title">
+        <input
+          value={data.title ?? ""}
+          onChange={(e) => onChange({ ...data, title: e.target.value })}
+          placeholder="React"
+          className="input"
+        />
+      </Field>
+      <Field label="Instruction">
+        <textarea
+          rows={5}
+          value={data.instruction ?? ""}
+          onChange={(e) => onChange({ ...data, instruction: e.target.value })}
+          placeholder="Check the caller's last reply against the item list in context."
+          className="input resize-none leading-relaxed"
+        />
+      </Field>
+      <Field label="Reply">
+        <p className="mb-2 text-xs text-muted-foreground">
+          How the AI should respond aloud. Moldable for any workflow — e.g. tell user missing
+          items are added to the list.
+        </p>
+        <textarea
+          rows={5}
+          value={data.replyGuide ?? ""}
+          onChange={(e) => onChange({ ...data, replyGuide: e.target.value })}
+          placeholder="If an item is missing, tell the user we have added it to the list. Name the item. Be short."
+          className="input resize-none leading-relaxed"
+        />
+      </Field>
+      <BranchEditor
+        data={data}
+        onChange={onChange}
+        responses={data.responses ?? []}
+        branchLabel="Expected user responses"
+        addLabel="Add response"
+      />
+      <Field label="Wait for caller response">
+        <label className="flex cursor-pointer items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={data.waitForResponse !== false}
+            onChange={(e) => onChange({ ...data, waitForResponse: e.target.checked })}
+            className="h-4 w-4 rounded border-border"
+          />
+          <span className="text-foreground/90">
+            Pause after speaking until caller acknowledges or asks a question
+          </span>
+        </label>
+      </Field>
+      <SilenceTimeoutField data={data} onChange={onChange} />
+      <Field label="Notes">
+        <textarea
+          rows={3}
+          value={data.notes ?? ""}
+          onChange={(e) => onChange({ ...data, notes: e.target.value })}
+          placeholder="Optional notes for this step…"
+          className="input resize-none text-xs"
+        />
+      </Field>
+    </div>
+  );
+}
+
 function UserInputForm({ data, onChange }: { data: NodeData; onChange: (d: NodeData) => void }) {
   return (
     <div className="space-y-5">
@@ -151,7 +226,7 @@ function UserInputForm({ data, onChange }: { data: NodeData; onChange: (d: NodeD
         <input
           value={data.title ?? ""}
           onChange={(e) => onChange({ ...data, title: e.target.value })}
-          placeholder="User Input"
+          placeholder="LLM"
           className="input"
         />
       </Field>
@@ -164,6 +239,13 @@ function UserInputForm({ data, onChange }: { data: NodeData; onChange: (d: NodeD
           className="input resize-none leading-relaxed"
         />
       </Field>
+      <BranchEditor
+        data={data}
+        onChange={onChange}
+        responses={data.responses ?? []}
+        branchLabel="Expected user responses"
+        addLabel="Add response"
+      />
       <Field label="Wait for caller response">
         <label className="flex cursor-pointer items-center gap-2 text-sm">
           <input

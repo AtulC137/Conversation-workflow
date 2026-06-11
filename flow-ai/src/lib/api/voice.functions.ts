@@ -5,10 +5,11 @@ import { getServerConfig } from "../config.server";
 
 const workflowGraphNodeSchema = z.object({
   id: z.string(),
-  type: z.enum(["start", "conversation", "qa", "userInput", "end"]),
+  type: z.enum(["start", "conversation", "qa", "userInput", "react", "end"]),
   title: z.string().optional(),
   message: z.string().optional(),
   instruction: z.string().optional(),
+  replyGuide: z.string().optional(),
   waitForResponse: z.boolean().optional(),
   silenceTimeoutSec: z.number().optional(),
   responses: z

@@ -1,19 +1,22 @@
 import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { hasPermission } from "../lib/permissions.js";
 import { prisma } from "../lib/prisma.js";
 import { routeParam } from "../lib/params.js";
+import { canAccessWorkflowRead, toMemberContext } from "../lib/workflow-access.js";
 import type { AuthedRequest } from "../middleware/auth.js";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, requirePermission } from "../middleware/auth.js";
 
 const SESSION_TTL_SECONDS = 3600;
 
 const workflowGraphNodeSchema = z.object({
   id: z.string(),
-  type: z.enum(["start", "conversation", "qa", "userInput", "end"]),
+  type: z.enum(["start", "conversation", "qa", "userInput", "react", "end"]),
   title: z.string().optional(),
   message: z.string().optional(),
   instruction: z.string().optional(),
+  replyGuide: z.string().optional(),
   waitForResponse: z.boolean().optional(),
   silenceTimeoutSec: z.number().optional(),
   responses: z
@@ -47,10 +50,31 @@ const voiceSessionConfigSchema = z.object({
   }),
 });
 
+async function canAccessSession(user: AuthedRequest["user"], sessionId: string) {
+  const session = await prisma.voiceSession.findFirst({
+    where: { id: sessionId },
+    include: { workflow: true },
+  });
+  if (!session || !user) return null;
+
+  if (session.userId === user.id) {
+    if (hasPermission(toMemberContext(user), "sessions.view_own")) return session;
+    return null;
+  }
+
+  if (!hasPermission(toMemberContext(user), "sessions.view_all")) return null;
+
+  if (session.workflow && session.workflow.organizationId === user.organizationId) {
+    return session;
+  }
+
+  return null;
+}
+
 export const voiceSessionsRouter = Router();
 voiceSessionsRouter.use(requireAuth);
 
-voiceSessionsRouter.post("/", async (req: AuthedRequest, res) => {
+voiceSessionsRouter.post("/", requirePermission("workflows.test"), async (req: AuthedRequest, res) => {
   const parsed = voiceSessionConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.flatten() });
@@ -61,9 +85,9 @@ voiceSessionsRouter.post("/", async (req: AuthedRequest, res) => {
 
   if (data.workflowId) {
     const wf = await prisma.workflow.findFirst({
-      where: { id: data.workflowId, userId: req.user!.id },
+      where: { id: data.workflowId, organizationId: req.user!.organizationId },
     });
-    if (!wf) {
+    if (!wf || !canAccessWorkflowRead(req.user!, wf)) {
       res.status(404).json({ error: "Workflow not found" });
       return;
     }
@@ -116,9 +140,7 @@ voiceSessionsRouter.post("/", async (req: AuthedRequest, res) => {
 
 voiceSessionsRouter.get("/:id", async (req: AuthedRequest, res) => {
   const id = routeParam(req.params.id);
-  const session = await prisma.voiceSession.findFirst({
-    where: { id, userId: req.user!.id },
-  });
+  const session = await canAccessSession(req.user, id);
   if (!session) {
     res.status(404).json({ error: "Session not found" });
     return;
@@ -137,9 +159,7 @@ voiceSessionsRouter.get("/:id", async (req: AuthedRequest, res) => {
 
 voiceSessionsRouter.get("/:id/transcript", async (req: AuthedRequest, res) => {
   const id = routeParam(req.params.id);
-  const session = await prisma.voiceSession.findFirst({
-    where: { id, userId: req.user!.id },
-  });
+  const session = await canAccessSession(req.user, id);
   if (!session) {
     res.status(404).json({ error: "Session not found" });
     return;

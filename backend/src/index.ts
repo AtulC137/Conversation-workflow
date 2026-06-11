@@ -3,6 +3,7 @@ import cors from "cors";
 import express from "express";
 import { startCleanupScheduler } from "./lib/cleanup.js";
 import { authRouter } from "./routes/auth.js";
+import { orgRouter } from "./routes/org.js";
 import { voiceSessionsRouter } from "./routes/voice-sessions.js";
 import { workflowsRouter } from "./routes/workflows.js";
 
@@ -24,6 +25,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/org", orgRouter);
 app.use("/api/workflows", workflowsRouter);
 app.use("/api/voice-sessions", voiceSessionsRouter);
 

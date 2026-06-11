@@ -1,9 +1,12 @@
 import { prisma } from "./prisma.js";
+import { purgeExpiredLocks } from "./workflow-lock.js";
 
 const RETENTION_DAYS = Number(process.env.RETENTION_DAYS ?? "90");
 
 export async function runRetentionCleanup(): Promise<void> {
   const now = new Date();
+
+  await purgeExpiredLocks();
 
   await prisma.voiceSession.updateMany({
     where: { status: "active", expiresAt: { lt: now } },

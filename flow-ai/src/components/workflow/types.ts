@@ -11,6 +11,7 @@ export type NodeData = {
   title?: string;
   message?: string;
   instruction?: string;
+  replyGuide?: string;
   waitForResponse?: boolean;
   silenceTimeoutSec?: number;
   responses?: ResponseBranch[];

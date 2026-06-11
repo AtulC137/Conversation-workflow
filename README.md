@@ -49,7 +49,7 @@ Opens http://localhost:5555
 ## First-time use
 
 1. Open http://localhost:8080 — you will be redirected to **Register**
-2. Create an account and sign in
+2. Create an organization and admin account, then sign in with **organization slug** + email + password
 3. Build a workflow: **Start** → **Conversation** → **End**
 4. Enable **Voice**, add **Context** if using Q&A blocks
 5. Click **Test Workflow** — voice UI opens in a new tab
@@ -73,8 +73,13 @@ voice-frontend (:3000) ──WebSocket──► voice-backend (:8000) ──► 
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/auth/register` | Create account |
-| POST | `/api/auth/login` | Sign in |
+| POST | `/api/auth/register` | Create organization + admin account |
+| POST | `/api/auth/login` | Sign in (organization slug + email + password) |
+| GET | `/api/auth/check-slug/:slug` | Check org slug availability |
+| GET | `/api/org` | Organization info |
+| GET | `/api/org/members` | List org members (dashboard) |
+| POST | `/api/org/members` | Invite member |
+| PATCH | `/api/org/members/:id` | Update role/permissions |
 | POST | `/api/auth/refresh` | Refresh access token (cookie) |
 | POST | `/api/auth/logout` | Sign out |
 | GET | `/api/auth/me` | Current user |

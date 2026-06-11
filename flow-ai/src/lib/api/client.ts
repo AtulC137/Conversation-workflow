@@ -1,3 +1,5 @@
+import type { ApiOrganization, OrganizationRole, PermissionsMap } from "@/lib/permissions";
+
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
 
 export type ApiUser = {
@@ -6,16 +8,30 @@ export type ApiUser = {
   name: string;
 };
 
-type AuthResponse = {
-  accessToken: string;
+export type AuthSession = {
   user: ApiUser;
+  organization: ApiOrganization;
+  role: OrganizationRole;
+  permissions: PermissionsMap;
 };
+
+type AuthResponse = AuthSession & {
+  accessToken: string;
+};
+
+type MeResponse = AuthSession;
 
 let accessToken: string | null =
   typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
 
+let sessionCache: AuthSession | null = null;
+
 export function getAccessToken() {
   return accessToken;
+}
+
+export function getSession() {
+  return sessionCache;
 }
 
 export function setAccessToken(token: string | null) {
@@ -24,6 +40,18 @@ export function setAccessToken(token: string | null) {
     if (token) localStorage.setItem("accessToken", token);
     else localStorage.removeItem("accessToken");
   }
+  if (!token) sessionCache = null;
+}
+
+function applyAuthResponse(data: AuthResponse) {
+  setAccessToken(data.accessToken);
+  sessionCache = {
+    user: data.user,
+    organization: data.organization,
+    role: data.role,
+    permissions: data.permissions,
+  };
+  return sessionCache;
 }
 
 export async function apiFetch<T>(
@@ -52,28 +80,47 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(typeof err.error === "string" ? err.error : "Request failed");
+    const message = typeof err.error === "string" ? err.error : "Request failed";
+    throw new ApiError(message, res.status, err);
   }
 
   return res.json() as Promise<T>;
 }
 
-export async function registerUser(email: string, password: string, name: string) {
-  const data = await apiFetch<AuthResponse>("/api/auth/register", {
-    method: "POST",
-    body: JSON.stringify({ email, password, name }),
-  });
-  setAccessToken(data.accessToken);
-  return data;
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+
+  constructor(message: string, status: number, body?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
 }
 
-export async function loginUser(email: string, password: string) {
+export type RegisterPayload = {
+  email: string;
+  password: string;
+  name: string;
+  organizationName: string;
+  organizationSlug: string;
+};
+
+export async function registerUser(payload: RegisterPayload) {
+  const data = await apiFetch<AuthResponse>("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return applyAuthResponse(data);
+}
+
+export async function loginUser(organizationSlug: string, email: string, password: string) {
   const data = await apiFetch<AuthResponse>("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ organizationSlug, email, password }),
   });
-  setAccessToken(data.accessToken);
-  return data;
+  return applyAuthResponse(data);
 }
 
 export async function refreshAccessToken() {
@@ -83,7 +130,7 @@ export async function refreshAccessToken() {
       { method: "POST" },
       false,
     );
-    setAccessToken(data.accessToken);
+    applyAuthResponse(data);
     return true;
   } catch {
     setAccessToken(null);
@@ -100,5 +147,34 @@ export async function logoutUser() {
 }
 
 export async function fetchMe() {
-  return apiFetch<{ user: ApiUser }>("/api/auth/me");
+  const data = await apiFetch<MeResponse>("/api/auth/me");
+  sessionCache = data;
+  return data;
+}
+
+export async function checkSlugAvailable(slug: string) {
+  return apiFetch<{ slug: string; available: boolean }>(`/api/auth/check-slug/${encodeURIComponent(slug)}`);
+}
+
+export function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
+export async function updateProfile(name: string) {
+  return apiFetch<{ user: ApiUser }>("/api/auth/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string) {
+  return apiFetch<{ ok: boolean }>("/api/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
 }

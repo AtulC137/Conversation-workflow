@@ -154,6 +154,7 @@ _OFF_SCRIPT_QUESTION = re.compile(
     r"(?:^|\s)(?:how\s+much|how\s+many|how\s+do|how\s+can|how\s+is|how\s+are|"
     r"what|when|where|why|who|which|tell\s+me|explain|"
     r"amount|fine|penalty|remaining|balance|total|cost|rupees|"
+    r"list|missing|repeat|again|item|items|order|delivery|address|include|name|"
     r"kitna|kitne|kya|kab|kahan|kaise|jurmana|baaki|shulk)\b",
     re.I,
 )
@@ -665,6 +666,144 @@ async def stream_context_tell(
         final_text = fallbacks.get(response_language, FALLBACK_EN)
 
     logger.info(f"[CONTEXT_TELL] node={node_id} spoken={final_text!r}")
+    await event_callback("llm_end", final_text, response_language)
+    return final_text
+
+
+def build_context_react_prompt(
+    context: str,
+    instruction: str,
+    node_title: str,
+    prior_message: str,
+    reply_guide: str = "",
+) -> str:
+    facts = context.strip() or "You are a helpful voice assistant for this business."
+    task = instruction.strip() or "Respond to the caller using the facts and their last message."
+    prior = prior_message.strip()
+    prior_block = f'\nPRIOR AI MESSAGE TO CALLER:\n"{prior}"\n' if prior else ""
+    guide = reply_guide.strip()
+    reply_block = (
+        f"\nREPLY GUIDANCE (what to say aloud):\n{guide}\n"
+        if guide
+        else ""
+    )
+    reply_rules = (
+        "- Follow REPLY GUIDANCE for tone and content; use the caller's words and FACTS.\n"
+        "- Name specific items the caller mentioned when REPLY GUIDANCE calls for it.\n"
+        if guide
+        else ""
+    )
+    return f"""You are on a live phone call. Follow the persona and facts below.
+
+Speak immediately and clearly.
+Use 2 to 3 short sentences. Maximum 60 words total. No thinking. No explanation.
+
+LANGUAGE — highest priority: mirror the caller's language from their last message.
+- English → Latin script only
+- Hindi → Devanagari only
+- Hinglish → Roman script mix, no Devanagari
+
+FACTS — use ONLY this block. Do not invent amounts or dates:
+{facts}
+
+CURRENT WORKFLOW STEP: "{node_title}"
+{prior_block}
+YOUR TASK:
+{task}
+{reply_block}
+RULES:
+- React to what the caller just said using ONLY the FACTS block and the task above.
+{reply_rules}- If a fact exists (amount, fine, date, name), state it clearly.
+- If a requested fact is NOT in FACTS, say "Sorry, I don't have that information." for that part only.
+- Do NOT repeat the prior question unless the task says to.
+- Do NOT speak as the caller.
+- Do NOT end the call or say goodbye."""
+
+
+async def stream_context_react(
+    transcript: str,
+    context: str,
+    instruction: str,
+    node_title: str,
+    prior_message: str,
+    event_callback,
+    cancel_event: asyncio.Event = None,
+    stt_lang: str | None = None,
+    on_language_retry=None,
+    node_id: str | None = None,
+    reply_guide: str = "",
+) -> str:
+    """Speak a reaction to the caller's last transcript using CONTEXT + instruction."""
+    if cancel_event is None:
+        cancel_event = asyncio.Event()
+
+    prompt = build_context_react_prompt(
+        context, instruction, node_title, prior_message, reply_guide
+    )
+    response_language = resolve_response_language(stt_lang, transcript or instruction)
+    logger.info(
+        f"[CONTEXT_REACT] node={node_id} transcript={transcript!r} lang={response_language}"
+    )
+
+    instruction_lang = LANG_INSTRUCTIONS[response_language]
+    prior_line = f'Prior AI said: "{prior_message}"\n' if prior_message.strip() else ""
+    user_content = (
+        f"{instruction_lang}\n"
+        f"{prior_line}"
+        f'Caller said: "{transcript}"\n'
+        f"Fulfill the task using FACTS only."
+    )
+
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    await event_callback("llm_start", "")
+
+    try:
+        final_text = await _complete_once(messages, cancel_event, event_callback, stream_tokens=True)
+    except asyncio.CancelledError:
+        logger.info("[CONTEXT_REACT] CancelledError — interrupted")
+        return ""
+    except Exception as e:
+        logger.error(f"[CONTEXT_REACT] {e}")
+        await event_callback("llm_error", str(e))
+        return ""
+
+    if cancel_event.is_set():
+        return ""
+
+    if final_text and not output_matches_language(final_text, response_language):
+        logger.warning(
+            f"[CONTEXT_REACT] Language mismatch (wanted {response_language}): "
+            f"{final_text[:80]!r} — retrying"
+        )
+        if on_language_retry:
+            await on_language_retry()
+        retry_content = (
+            f"{RETRY_INSTRUCTIONS[response_language]}\n"
+            f'Caller said: "{transcript}"\n'
+            f"Fulfill the task using FACTS only."
+        )
+        retry_messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": retry_content},
+        ]
+        try:
+            retry_text = await _complete_once(
+                retry_messages, cancel_event, event_callback, stream_tokens=False
+            )
+            if retry_text and output_matches_language(retry_text, response_language):
+                final_text = retry_text
+        except Exception as e:
+            logger.error(f"[CONTEXT_REACT] Retry failed: {e}")
+
+    if not final_text:
+        fallbacks = {"english": FALLBACK_EN, "hindi": FALLBACK_HI, "hinglish": FALLBACK_HINGLISH}
+        final_text = fallbacks.get(response_language, FALLBACK_EN)
+
+    logger.info(f"[CONTEXT_REACT] node={node_id} spoken={final_text!r}")
     await event_callback("llm_end", final_text, response_language)
     return final_text
 

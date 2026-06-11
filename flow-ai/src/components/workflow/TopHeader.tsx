@@ -18,6 +18,9 @@ type Props = {
   title: string;
   status?: string;
   canEdit?: boolean;
+  canTest?: boolean;
+  canPublish?: boolean;
+  lockedByName?: string | null;
   tools: WorkflowTools;
   hasContext: boolean;
   saving?: boolean;
@@ -34,6 +37,9 @@ export function TopHeader({
   title,
   status = "draft",
   canEdit = true,
+  canTest = true,
+  canPublish = true,
+  lockedByName = null,
   tools,
   hasContext,
   saving = false,
@@ -49,7 +55,13 @@ export function TopHeader({
   const [editing, setEditing] = useState(false);
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-white px-4">
+    <>
+      {lockedByName && (
+        <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+          Being edited by <span className="font-semibold">{lockedByName}</span> — view only
+        </div>
+      )}
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
       {/* Title */}
       <div className="flex min-w-0 items-center gap-2">
         {editing && canEdit ? (
@@ -90,7 +102,8 @@ export function TopHeader({
       <div className="hidden items-center gap-1.5 md:flex">
         <button
           onClick={onOpenContext}
-          className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+          disabled={!canEdit}
+          className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
             hasContext
               ? "border-violet-600 bg-violet-500 text-white shadow-sm"
               : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/30 hover:text-foreground"
@@ -102,12 +115,14 @@ export function TopHeader({
           icon={Phone}
           label="Voice"
           enabled={tools.voice.enabled}
+          disabled={!canEdit}
           onToggle={() => onToggleTool("voice")}
         />
         <ToolToggle
           icon={MessageCircle}
           label="WhatsApp"
           enabled={tools.whatsapp.enabled}
+          disabled={!canEdit}
           onToggle={() => onToggleTool("whatsapp")}
           onConfigure={() => onConfigureTool("whatsapp")}
         />
@@ -128,13 +143,15 @@ export function TopHeader({
 
       <button
         onClick={onTest}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-foreground/30 hover:shadow-sm"
+        disabled={!canTest}
+        className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-foreground/30 hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Play className="h-3.5 w-3.5" /> Test Workflow
       </button>
       <button
         onClick={onPublish}
-        className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background transition hover:opacity-90"
+        disabled={!canPublish}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-xs font-medium text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Rocket className="h-3.5 w-3.5" /> Publish
         <ChevronDown className="h-3 w-3 opacity-70" />
@@ -146,6 +163,7 @@ export function TopHeader({
         Log out
       </button>
     </header>
+    </>
   );
 }
 
@@ -153,12 +171,14 @@ function ToolToggle({
   icon: Icon,
   label,
   enabled,
+  disabled,
   onToggle,
   onConfigure,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   enabled: boolean;
+  disabled?: boolean;
   onToggle: () => void;
   onConfigure?: () => void;
 }) {
@@ -166,7 +186,8 @@ function ToolToggle({
     <div className="flex items-center gap-0.5">
       <button
         onClick={onToggle}
-        className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition ${
+        disabled={disabled}
+        className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
           enabled
             ? "border-emerald-600 bg-emerald-500 text-white shadow-sm"
             : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/30 hover:text-foreground"
