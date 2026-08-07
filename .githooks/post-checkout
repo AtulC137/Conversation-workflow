@@ -1,0 +1,28 @@
+#!/bin/sh
+# After checkout: swap backend/.env + regenerate Prisma client.
+prev=$1
+new=$2
+flag=$3
+
+[ "$flag" = "1" ] || exit 0
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+root=$(git rev-parse --show-toplevel)
+backend="$root/backend"
+
+[ -d "$backend" ] || exit 0
+
+# All branches use MySQL (voice/sip need mysql://). Use .env.mysql when present.
+src="$backend/.env.mysql"
+if [ -f "$src" ]; then
+  cp "$src" "$backend/.env"
+  echo "[db-switch] branch=$branch → MySQL (.env.mysql)"
+else
+  echo "[db-switch] missing $src — keep current .env"
+fi
+
+if command -v npx >/dev/null 2>&1; then
+  (cd "$backend" && npx prisma generate >/dev/null 2>&1) && echo "[db-switch] prisma generate ok"
+fi
+
+exit 0

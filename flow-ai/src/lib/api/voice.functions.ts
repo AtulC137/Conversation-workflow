@@ -41,6 +41,9 @@ const voiceSessionConfigSchema = z.object({
     edges: z.array(workflowGraphEdgeSchema),
   }),
   accessToken: z.string(),
+  testMode: z.enum(["browser", "phone"]).default("browser"),
+  phoneNumber: z.string().optional(),
+  contactFields: z.record(z.string()).optional(),
 });
 
 export const createVoiceSession = createServerFn({ method: "POST" })
@@ -63,5 +66,5 @@ export const createVoiceSession = createServerFn({ method: "POST" })
       throw new Error(`Voice session error (${res.status}): ${text}`);
     }
 
-    return res.json() as Promise<{ sessionId: string }>;
+    return res.json() as Promise<{ sessionId: string; testMode?: "browser" | "phone" }>;
   });

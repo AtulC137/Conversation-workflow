@@ -14,7 +14,7 @@ dist-ssr/
 .wrangler/
 .dev.vars
 
-# Python (voice_agent)
+# Python (agents)
 __pycache__/
 *.py[cod]
 *$py.class
@@ -47,6 +47,12 @@ Thumbs.db
 
 # Local / build artifacts
 *.local
+*.db
+*.db-journal
+backend/prisma/*.db
+backend/prisma/*.db-journal
+backend/.env.sqlite
+backend/.env.mysql
 
 # Cursor (local plans, agent state)
 .cursor/

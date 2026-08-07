@@ -1,0 +1,149 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8
+    container_name: conversation-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: conversation_workflow
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app_secret
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  adminer:
+    image: adminer
+    container_name: conversation-adminer
+    ports:
+      - "8081:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  backend:
+    build: .
+    container_name: conversation-backend
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: mysql://app:app_secret@mysql:3306/conversation_workflow
+      VOICE_BACKEND_URL: http://voice-backend:8000
+      PORT: "3001"
+      NODE_ENV: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  voice-backend:
+    build:
+      context: ./agents/voice
+      dockerfile: Dockerfile
+    container_name: voice-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./agents/voice/.env
+    environment:
+      DATABASE_URL: mysql://app:app_secret@mysql:3306/conversation_workflow
+      SESSION_TTL_SECONDS: "3600"
+      ASTERISK_AMI_HOST: asterisk
+      ASTERISK_AMI_PORT: "5038"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  piopiy-agent:
+    profiles: [piopiy]
+    build:
+      context: ./agents/voice
+      dockerfile: Dockerfile
+    container_name: piopiy-agent
+    command: ["python", "piopiy_agent.py"]
+    env_file:
+      - ./agents/voice/.env
+    environment:
+      DATABASE_URL: mysql://app:app_secret@mysql:3306/conversation_workflow
+      SESSION_TTL_SECONDS: "3600"
+      PIOPIY_AGENT_ID: ${PIOPIY_AGENT_ID:-}
+      PIOPIY_AGENT_TOKEN: ${PIOPIY_AGENT_TOKEN:-}
+      PIOPIY_CALLER_ID: ${PIOPIY_CALLER_ID:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  sip-media-bridge:
+    build:
+      context: ./agents/voice
+      dockerfile: Dockerfile
+    container_name: sip-media-bridge
+    command: ["python", "sip_media_bridge.py"]
+    env_file:
+      - ./agents/voice/.env
+    environment:
+      DATABASE_URL: mysql://app:app_secret@mysql:3306/conversation_workflow
+      SESSION_TTL_SECONDS: "3600"
+      SIP_AUDIOSOCKET_HOST: "0.0.0.0"
+      SIP_AUDIOSOCKET_PORT: "9092"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - conversation
+
+  asterisk:
+    build:
+      context: ./agents/voice
+      dockerfile: asterisk/Dockerfile
+    container_name: voice-asterisk
+    env_file:
+      - ./agents/voice/.env
+    environment:
+      VOICE_BACKEND_URL: http://voice-backend:8000
+      SIP_AUDIOSOCKET_PEER: sip-media-bridge
+      SIP_AUDIOSOCKET_PORT: "9092"
+      ASTERISK_AMI_SECRET: ${ASTERISK_AMI_SECRET:-changeme}
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "5061:5061/tcp"
+      - "10000-10100:10000-10100/udp"
+    depends_on:
+      - sip-media-bridge
+      - voice-backend
+    restart: unless-stopped
+    networks:
+      - conversation
+
+networks:
+  conversation:
+    name: conversation-net
+
+volumes:
+  mysql_data:
+    name: conversationworkflow_mysql_data

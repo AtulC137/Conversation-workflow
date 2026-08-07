@@ -97,7 +97,7 @@ model User {
 model AuthSession {
   id               String    @id @db.Char(36)
   userId           String    @map("user_id") @db.Char(36)
-  refreshTokenHash String    @map("refresh_token_hash") @db.VarChar(255)
+  refreshTokenHash String    @unique @map("refresh_token_hash") @db.VarChar(255)
   expiresAt        DateTime  @map("expires_at")
   createdAt        DateTime  @default(now()) @map("created_at")
   revokedAt        DateTime? @map("revoked_at")
@@ -105,7 +105,7 @@ model AuthSession {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
-  @@index([refreshTokenHash])
+  @@index([expiresAt])
   @@map("auth_sessions")
 }
 
@@ -113,12 +113,14 @@ model Workflow {
   id             String         @id @db.Char(36)
   userId         String         @map("user_id") @db.Char(36)
   organizationId String         @map("organization_id") @db.Char(36)
-  name           String         @default("Untitled workflow") @db.VarChar(200)
-  context        String         @db.Text
-  tools          Json
-  nodes          Json
-  edges          Json
-  status         WorkflowStatus @default(draft)
+  name                  String         @default("Untitled workflow") @db.VarChar(200)
+  context               String         @db.Text
+  script                String         @db.Text
+  confirmationQuestion  String         @default("") @map("confirmation_question") @db.VarChar(500)
+  tools                 Json
+  nodes                 Json
+  edges                 Json
+  status                WorkflowStatus @default(draft)
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 

@@ -8,6 +8,7 @@ import {
   permissionsForRole,
   ROLE_PRESETS,
   parsePermissions,
+  validatePermissionsMap,
 } from "../lib/permissions.js";
 import { prisma } from "../lib/prisma.js";
 import { routeParam } from "../lib/params.js";
@@ -113,6 +114,11 @@ orgRouter.post("/members", requirePermission("users.invite"), async (req: Authed
   }
 
   const perms = permissionsForRole(role);
+  const validatedPerms = validatePermissionsMap(perms);
+  if (!validatedPerms) {
+    res.status(500).json({ error: "Invalid role permissions preset" });
+    return;
+  }
 
   if (!user) {
     user = await prisma.user.create({
@@ -131,7 +137,7 @@ orgRouter.post("/members", requirePermission("users.invite"), async (req: Authed
       organizationId: orgId,
       userId: user.id,
       role,
-      permissions: perms as unknown as Prisma.InputJsonValue,
+      permissions: validatedPerms as unknown as Prisma.InputJsonValue,
       status: "active",
     },
     include: { user: { select: { id: true, email: true, name: true } } },
@@ -211,12 +217,18 @@ orgRouter.patch("/members/:id", requirePermission("users.manage"), async (req: A
     permissions = permissionsForRole("admin");
   }
 
+  const validatedPermissions = validatePermissionsMap(permissions);
+  if (!validatedPermissions) {
+    res.status(400).json({ error: "Invalid permissions" });
+    return;
+  }
+
   const updated = await prisma.organizationMember.update({
     where: { id: member.id },
     data: {
       ...(data.role !== undefined && { role: data.role }),
       ...(data.status !== undefined && { status: data.status }),
-      permissions: permissions as unknown as Prisma.InputJsonValue,
+      permissions: validatedPermissions as unknown as Prisma.InputJsonValue,
     },
     include: { user: { select: { id: true, email: true, name: true } } },
   });

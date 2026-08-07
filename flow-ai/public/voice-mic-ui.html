@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Voice Workflow Test</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    :root {
+      --radius: 0.75rem;
+      --background: oklch(1 0 0);
+      --foreground: oklch(0.18 0.005 270);
+      --card: oklch(1 0 0);
+      --muted: oklch(0.97 0.002 270);
+      --muted-foreground: oklch(0.52 0.01 270);
+      --border: oklch(0.92 0.004 270);
+      --primary: oklch(0.18 0.005 270);
+      --primary-foreground: oklch(0.99 0 0);
+      --destructive: oklch(0.58 0.22 27);
+      --accent-user: oklch(0.45 0.12 145);
+      --accent-ai: oklch(0.55 0.14 55);
+      --accent-event: oklch(0.55 0.01 270);
+      --accent-speaking: oklch(0.55 0.18 300);
+      --accent-listening: oklch(0.45 0.14 250);
+      --accent-speech: oklch(0.65 0.16 85);
+      --panel-bg: oklch(0.985 0.002 270);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--background);
+      color: var(--foreground);
+      font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--foreground);
+    }
+    .header p {
+      color: var(--muted-foreground);
+      font-size: 0.8125rem;
+      margin-top: 0.35rem;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 720px;
+      box-shadow: 0 4px 18px -8px rgba(0, 0, 0, 0.12);
+    }
+
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.75rem;
+      color: var(--muted-foreground);
+      margin-bottom: 1.25rem;
+      padding-bottom: 0.875rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted-foreground);
+      flex-shrink: 0;
+      transition: background 0.3s;
+      opacity: 0.5;
+    }
+    .dot.connected   { background: var(--accent-user); opacity: 1; }
+    .dot.listening   { background: var(--accent-listening); opacity: 1; animation: pulse 1s infinite; }
+    .dot.speech      { background: var(--accent-speech); opacity: 1; animation: pulse 0.5s infinite; }
+    .dot.thinking    { background: var(--accent-ai); opacity: 1; animation: pulse 0.7s infinite; }
+    .dot.speaking    { background: var(--accent-speaking); opacity: 1; animation: pulse 0.8s infinite; }
+    .dot.interrupted { background: var(--destructive); opacity: 1; }
+    .dot.error       { background: var(--destructive); opacity: 1; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .visualizer-wrap {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 1.25rem;
+    }
+    #visualizer {
+      width: 100%;
+      height: 56px;
+      border-radius: calc(var(--radius) - 4px);
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    button {
+      flex: 1;
+      padding: 0.5rem 1rem;
+      border-radius: calc(var(--radius) - 2px);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    #startBtn {
+      background: var(--primary);
+      color: var(--primary-foreground);
+      border: none;
+    }
+    #startBtn:hover:not(:disabled) { opacity: 0.9; }
+    #startBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+    #stopBtn {
+      background: transparent;
+      color: var(--foreground);
+      border: 1px solid var(--border);
+    }
+    #stopBtn:hover:not(:disabled) { background: var(--muted); }
+    #stopBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 600px) {
+      .panels { grid-template-columns: 1fr; }
+    }
+
+    .panel-label {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--muted-foreground);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .panel-label .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 0.625rem;
+      font-weight: 500;
+    }
+    .badge-user  { background: oklch(0.95 0.03 145); color: var(--accent-user); border: 1px solid oklch(0.88 0.05 145); }
+    .badge-ai    { background: oklch(0.96 0.03 55); color: var(--accent-ai); border: 1px solid oklch(0.88 0.06 55); }
+
+    .transcript-box,
+    .ai-box {
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--radius) - 4px);
+      padding: 0.875rem;
+      min-height: 220px;
+      max-height: 340px;
+      overflow-y: auto;
+      font-size: 0.8125rem;
+      line-height: 1.6;
+      scroll-behavior: smooth;
+    }
+
+    .t-line { margin-bottom: 0.35rem; }
+    .t-user  { color: var(--accent-user); }
+    .t-user::before  { content: "You: "; color: var(--muted-foreground); font-weight: 500; }
+    .t-event { color: var(--accent-event); font-size: 0.75rem; }
+    .t-error { color: var(--destructive); }
+    .t-placeholder { color: var(--muted-foreground); font-style: italic; }
+
+    .ai-turn {
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .ai-turn:last-child { border-bottom: none; margin-bottom: 0; }
+
+    .ai-turn-label {
+      font-size: 0.625rem;
+      font-weight: 500;
+      color: var(--muted-foreground);
+      margin-bottom: 0.3rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .ai-turn-text {
+      color: var(--foreground);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ai-turn-text.streaming::after {
+      content: '▌';
+      animation: blink 0.6s step-end infinite;
+      color: var(--foreground);
+      opacity: 0.6;
+    }
+
+    .ai-turn-text.interrupted {
+      opacity: 0.5;
+    }
+    .ai-turn-text.interrupted::after {
+      content: ' (interrupted)';
+      color: var(--destructive);
+      animation: none;
+      opacity: 0.8;
+      font-size: 0.75rem;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    .ai-placeholder { color: var(--muted-foreground); font-style: italic; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Voice Workflow Test</h1>
+  <p id="headerSubtitle">Real-time voice · microphone test</p>
+</div>
+
+<div class="card">
+  <div class="status-bar">
+    <div class="dot" id="dot"></div>
+    <span id="statusText">Idle — click Start to begin</span>
+  </div>
+
+  <div class="visualizer-wrap">
+    <canvas id="visualizer"></canvas>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+  </div>
+
+  <div class="panels">
+    <div>
+      <div class="panel-label">
+        Live Transcript <span class="badge badge-user">YOU</span>
+      </div>
+      <div class="transcript-box" id="transcript">
+        <div class="t-line t-placeholder">Your speech will appear here…</div>
+      </div>
+    </div>
+    <div>
+      <div class="panel-label">
+        AI Response <span class="badge badge-ai">ASSISTANT</span>
+      </div>
+      <div class="ai-box" id="aiBox">
+        <div class="ai-placeholder">Assistant responses will appear here…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const urlParams = new URLSearchParams(window.location.search);
+  const SESSION_ID = urlParams.get('session');
+  const WS_HOST = window.location.hostname || 'localhost';
+  const useWsProxy = urlParams.get('wsProxy') === '1';
+  const WS_PORT = useWsProxy
+    ? (urlParams.get('apiPort') || '3001')
+    : (urlParams.get('wsPort') || '8000');
+  const WS_PATH = useWsProxy ? '/voice/ws/audio' : '/ws/audio';
+  const WS_URL = SESSION_ID
+    ? `ws://${WS_HOST}:${WS_PORT}${WS_PATH}?sessionId=${encodeURIComponent(SESSION_ID)}`
+    : null;
+
+  const SAMPLE_RATE = 16000;
+  const CHUNK_SIZE  = 4096;
+
+  const startBtn     = document.getElementById('startBtn');
+  const stopBtn      = document.getElementById('stopBtn');
+  const transcriptEl = document.getElementById('transcript');
+  const aiBox        = document.getElementById('aiBox');
+  const statusText   = document.getElementById('statusText');
+  const dot          = document.getElementById('dot');
+
+  let ws = null, audioCtx = null, mediaStream = null;
+  let workletNode = null, sourceNode = null;
+  let animFrameId = null, analyser = null;
+  let firstTranscript = true;
+  let firstAI = true;
+
+  // Current streaming AI turn element
+  let currentAiTurnEl = null;
+  let currentAiTextEl = null;
+  let currentAiBuffer = '';
+
+  // ── TTS Audio Engine (PCM s16le @ 16kHz from Sarvam TTS WebSocket) ───
+  //
+  // INTERRUPT: scheduled BufferSourceNodes; stopTtsNow() kills all instantly.
+  // PCM chunks play immediately — no MP3 decode buffer / accumulation delay.
+  //
+  let ttsAudioCtx      = null;
+  let ttsNextPlayAt    = 0;
+  let ttsPlaying       = false;
+  let ttsScheduled     = [];
+  let ttsSessionId     = 0;
+  let activeTtsSession = 0;
+  let ttsSampleRate    = 16000;
+  let ttsDecodeGeneration = 0;
+  let llmThinking      = false;
+  let lastTtsStartAtMs = 0;
+  let farewellMode           = false;
+  let greetingMode           = false;
+  let micSending             = false;
+  let farewellCleanupScheduled = false;
+
+  function getTtsAudioCtx() {
+    if (!ttsAudioCtx || ttsAudioCtx.state === 'closed') {
+      ttsAudioCtx  = new AudioContext({ sampleRate: ttsSampleRate });
+      ttsNextPlayAt = 0;
+    }
+    return ttsAudioCtx;
+  }
+
+  /** Browser autoplay: TTS ctx often stays suspended until resumed after a user gesture. */
+  async function unlockTtsAudio() {
+    const ctx = getTtsAudioCtx();
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+        console.log('[TTS] AudioContext resumed');
+      } catch (err) {
+        console.warn('[TTS] AudioContext resume failed', err);
+      }
+    }
+    return ctx;
+  }
+
+  function invalidateTtsSession() {
+    activeTtsSession = 0;
+    ttsDecodeGeneration++;
+  }
+
+  function stopTtsNow() {
+    ttsDecodeGeneration++;
+    ttsPlaying     = false;
+    ttsScheduled.forEach(src => {
+      try { src.stop(0); } catch (_) {}
+    });
+    ttsScheduled  = [];
+    ttsNextPlayAt = 0;
+    // Keep AudioContext alive so Start-click unlock survives beginTtsSession/interrupts.
+    if (ttsAudioCtx && ttsAudioCtx.state !== 'closed') {
+      ttsNextPlayAt = ttsAudioCtx.currentTime;
+    }
+  }
+
+  function closeTtsAudioCtx() {
+    if (ttsAudioCtx && ttsAudioCtx.state !== 'closed') {
+      ttsAudioCtx.close().catch(() => {});
+    }
+    ttsAudioCtx = null;
+    ttsNextPlayAt = 0;
+  }
+
+  function beginTtsSession() {
+    stopTtsNow();
+    activeTtsSession = ++ttsSessionId;
+    ttsPlaying       = true;
+    const ctx        = getTtsAudioCtx();
+    ttsNextPlayAt    = ctx.currentTime;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+  }
+
+  function enqueuePcmChunk(arrayBuffer, sessionId) {
+    if (!ttsPlaying || sessionId !== activeTtsSession) return;
+    const generation = ttsDecodeGeneration;
+    const ctx = getTtsAudioCtx();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    const int16 = new Int16Array(arrayBuffer);
+    if (int16.length === 0) return;
+
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    if (generation !== ttsDecodeGeneration || sessionId !== activeTtsSession || !ttsPlaying) return;
+
+    const audioBuffer = ctx.createBuffer(1, float32.length, ttsSampleRate);
+    audioBuffer.getChannelData(0).set(float32);
+
+    if (generation !== ttsDecodeGeneration || sessionId !== activeTtsSession || !ttsPlaying) return;
+
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ctx.destination);
+    src.onended = () => {
+      ttsScheduled = ttsScheduled.filter(s => s !== src);
+    };
+
+    const now   = ctx.currentTime;
+    const start = Math.max(now + 0.02, ttsNextPlayAt);
+    src.start(start);
+    ttsNextPlayAt = start + audioBuffer.duration;
+    ttsScheduled.push(src);
+  }
+
+  function resetTtsEngine() {
+    stopTtsNow();
+    closeTtsAudioCtx();
+    invalidateTtsSession();
+  }
+
+  function notifyTtsPlaybackComplete(endSession) {
+    if (endSession !== activeTtsSession) return;
+    if (farewellMode) {
+      waitForTtsPlaybackThenCleanup();
+      return;
+    }
+    ttsPlaying = false;
+    llmThinking = false;
+    if (greetingMode) {
+      greetingMode = false;
+    }
+    micSending = true;
+    setStatus('listening', 'Listening · Speak now');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'tts_playback_done' }));
+    }
+  }
+
+  function scheduleTtsPlaybackComplete(endSession) {
+    const ctx = ttsAudioCtx;
+    const remainingMs = ctx && ctx.state !== 'closed'
+      ? Math.max(0, (ttsNextPlayAt - ctx.currentTime) * 1000) + 250
+      : 0;
+    setTimeout(() => {
+      if (endSession !== activeTtsSession) return;
+      if (ttsScheduled.length === 0) {
+        notifyTtsPlaybackComplete(endSession);
+        return;
+      }
+      const deadline = Date.now() + 2500;
+      const check = setInterval(() => {
+        if (endSession !== activeTtsSession) {
+          clearInterval(check);
+          return;
+        }
+        if (ttsScheduled.length === 0 || Date.now() >= deadline) {
+          clearInterval(check);
+          notifyTtsPlaybackComplete(endSession);
+        }
+      }, 50);
+    }, remainingMs);
+  }
+
+  function stopMicAndWs() {
+    if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }
+    if (workletNode) { workletNode.disconnect(); workletNode = null; }
+    if (sourceNode)  { sourceNode.disconnect(); sourceNode = null; }
+    analyser = null;
+    if (audioCtx)    { audioCtx.close(); audioCtx = null; }
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    ws = null;
+  }
+
+  function waitForTtsPlaybackThenCleanup() {
+    if (farewellCleanupScheduled) return;
+    farewellCleanupScheduled = true;
+
+    function finish() {
+      if (ttsAudioCtx && ttsAudioCtx.state !== 'closed') {
+        ttsAudioCtx.close().catch(() => {});
+        ttsAudioCtx = null;
+      }
+      resetTtsEngine();
+      farewellMode = false;
+      micSending = false;
+      stopMicAndWs();
+      finalizeAiTurn('');
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+      setStatus('', 'Disconnected');
+      drawIdle();
+    }
+
+    const ctx = ttsAudioCtx;
+    if (!ctx || ctx.state === 'closed') {
+      finish();
+      return;
+    }
+
+    const remainingMs = Math.max(0, (ttsNextPlayAt - ctx.currentTime) * 1000) + 300;
+    setTimeout(() => {
+      if (ttsScheduled.length === 0) {
+        finish();
+        return;
+      }
+      const deadline = Date.now() + remainingMs + 3000;
+      const check = setInterval(() => {
+        if (ttsScheduled.length === 0 || Date.now() >= deadline) {
+          clearInterval(check);
+          finish();
+        }
+      }, 100);
+    }, remainingMs);
+  }
+
+  // ── Canvas visualizer ──────────────────────────────────────────────────
+  const canvas = document.getElementById('visualizer');
+  const ctx2d  = canvas.getContext('2d');
+
+  function resizeCanvas() {
+    canvas.width  = canvas.offsetWidth;
+    canvas.height = canvas.offsetHeight;
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  function drawIdle() {
+    resizeCanvas();
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    const mid = canvas.height / 2;
+    ctx2d.strokeStyle = 'oklch(0.92 0.004 270)';
+    ctx2d.lineWidth = 1.5;
+    ctx2d.beginPath();
+    ctx2d.moveTo(0, mid);
+    ctx2d.lineTo(canvas.width, mid);
+    ctx2d.stroke();
+  }
+  drawIdle();
+
+  function drawWaveform() {
+    if (!analyser) return;
+    animFrameId = requestAnimationFrame(drawWaveform);
+    resizeCanvas();
+    const bufLen = analyser.fftSize;
+    const data   = new Float32Array(bufLen);
+    analyser.getFloatTimeDomainData(data);
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2d.strokeStyle = 'oklch(0.18 0.005 270)';
+    ctx2d.lineWidth   = 1.5;
+    ctx2d.shadowBlur  = 0;
+    ctx2d.beginPath();
+    const sliceW = canvas.width / bufLen;
+    let x = 0;
+    for (let i = 0; i < bufLen; i++) {
+      const y = (data[i] * 0.5 + 0.5) * canvas.height;
+      i === 0 ? ctx2d.moveTo(x, y) : ctx2d.lineTo(x, y);
+      x += sliceW;
+    }
+    ctx2d.stroke();
+  }
+
+  // ── Status helpers ─────────────────────────────────────────────────────
+  function setStatus(state, msg) {
+    dot.className  = 'dot ' + state;
+    statusText.textContent = msg;
+  }
+
+  function addTranscriptLine(cls, text) {
+    if (firstTranscript) {
+      transcriptEl.innerHTML = '';
+      firstTranscript = false;
+    }
+    const div = document.createElement('div');
+    div.className   = 't-line ' + cls;
+    div.textContent = text;
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  // ── AI streaming helpers ───────────────────────────────────────────────
+  function startAiTurn() {
+    if (firstAI) {
+      aiBox.innerHTML = '';
+      firstAI = false;
+    }
+    currentAiBuffer = '';
+
+    const turn = document.createElement('div');
+    turn.className = 'ai-turn';
+
+    const label = document.createElement('div');
+    label.className   = 'ai-turn-label';
+    label.textContent = 'Assistant';
+    turn.appendChild(label);
+
+    const textEl = document.createElement('div');
+    textEl.className = 'ai-turn-text streaming';
+    turn.appendChild(textEl);
+
+    aiBox.appendChild(turn);
+    aiBox.scrollTop = aiBox.scrollHeight;
+
+    currentAiTurnEl = turn;
+    currentAiTextEl = textEl;
+  }
+
+  function appendAiToken(token) {
+    if (!currentAiTextEl) return;
+    currentAiBuffer += token;
+    currentAiTextEl.textContent = currentAiBuffer;
+    aiBox.scrollTop = aiBox.scrollHeight;
+  }
+
+  function finalizeAiTurn(fullText) {
+    if (currentAiTextEl) {
+      currentAiTextEl.classList.remove('streaming');
+      if (fullText) currentAiTextEl.textContent = fullText;
+    }
+    currentAiTurnEl = null;
+    currentAiTextEl = null;
+    currentAiBuffer = '';
+  }
+
+  // Mark current AI turn as interrupted (dimmed + ✕ marker)
+  function markAiTurnInterrupted() {
+    if (currentAiTextEl) {
+      currentAiTextEl.classList.remove('streaming');
+      currentAiTextEl.classList.add('interrupted');
+    }
+    currentAiTurnEl = null;
+    currentAiTextEl = null;
+    currentAiBuffer = '';
+  }
+
+  // ── WebSocket message handler ──────────────────────────────────────────
+  function handleMessage(evt) {
+
+    // Binary frame = TTS PCM audio chunk
+    if (evt.data instanceof ArrayBuffer) {
+      if (ttsPlaying) enqueuePcmChunk(evt.data, activeTtsSession);
+      return;
+    }
+
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch (_) { return; }
+
+    switch (msg.type) {
+
+      // ── INTERRUPT ────────────────────────────────────────────────────
+      // Server confirms cancellation of LLM+TTS tasks.
+      // Stop all audio immediately — this is the core of interrupt handling.
+      case 'interrupted':
+        if (farewellMode || greetingMode) break;
+        llmThinking = false;
+        stopTtsNow();
+        invalidateTtsSession();
+        markAiTurnInterrupted();
+        micSending = true;
+        setStatus('interrupted', 'Interrupted · Listening...');
+        addTranscriptLine('t-event', '── interrupted');
+        break;
+
+      case 'greeting_start':
+        greetingMode = true;
+        micSending = false;
+        setStatus('speaking', 'Susha introducing...');
+        if (msg.text) addTranscriptLine('t-ai', msg.text);
+        break;
+
+      case 'greeting_end':
+        // mic + greetingMode stay locked until tts_end playback completes
+        break;
+
+      case 'speech_start':
+        if (farewellMode || greetingMode) break;
+        stopTtsNow();
+        invalidateTtsSession();
+        micSending = true;
+        setStatus('speech', 'Listening · Speech detected');
+        addTranscriptLine('t-event', '── speech detected');
+        break;
+
+      case 'speech_end':
+        setStatus('listening', 'Listening · Waiting for speech');
+        addTranscriptLine('t-event', '── speech ended');
+        break;
+
+      case 'transcript':
+        if (msg.text) addTranscriptLine('t-user', msg.text);
+        break;
+
+      case 'llm_start':
+        if (farewellMode) break;
+        llmThinking = true;
+        micSending = false;
+        setStatus('thinking', 'AI thinking...');
+        startAiTurn();
+        break;
+
+      case 'llm_token':
+        if (msg.token) appendAiToken(msg.token);
+        break;
+
+      case 'llm_end':
+        llmThinking = false;
+        finalizeAiTurn(msg.text || '');
+        break;
+
+      case 'llm_error':
+        setStatus('error', 'AI error');
+        finalizeAiTurn('');
+        if (currentAiTextEl) {
+          currentAiTextEl.style.color = 'var(--destructive)';
+          currentAiTextEl.textContent = msg.text || 'Error';
+        }
+        break;
+
+      case 'farewell_start':
+        farewellMode = true;
+        micSending = false;
+        setStatus('speaking', 'Goodbye...');
+        addTranscriptLine('t-event', '── goodbye');
+        break;
+
+      case 'session_end':
+        micSending = false;
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+        break;
+
+      case 'tts_start':
+        if (msg.sampleRate) ttsSampleRate = msg.sampleRate;
+        beginTtsSession();
+        lastTtsStartAtMs = Date.now();
+        micSending = false;
+        if (greetingMode) {
+          setStatus('speaking', 'Susha introducing...');
+        } else {
+          setStatus('speaking', farewellMode ? 'Goodbye...' : 'AI speaking...');
+        }
+        break;
+
+      case 'tts_end':
+        scheduleTtsPlaybackComplete(activeTtsSession);
+        break;
+    }
+  }
+
+  // ── Start button ───────────────────────────────────────────────────────
+  if (!SESSION_ID) {
+    startBtn.disabled = true;
+    setStatus('error', 'No session — open from flow-ai Test Workflow');
+    statusText.textContent = 'Missing ?session= in URL — use Test Workflow in flow-ai';
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (!WS_URL) {
+      setStatus('error', 'No session ID');
+      return;
+    }
+    startBtn.disabled = true;
+    stopBtn.disabled  = false;
+    setStatus('', 'Connecting...');
+
+    try {
+      // Unlock speaker AudioContext in the user-gesture turn (browser-only).
+      await unlockTtsAudio();
+
+      farewellMode = false;
+      greetingMode = false;
+      micSending = false;
+      farewellCleanupScheduled = false;
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen    = () => { setStatus('connected', 'Connected · Susha is greeting you...'); startMic(); };
+      ws.onmessage = handleMessage;
+      ws.onerror   = () => { setStatus('error', 'WebSocket error'); addTranscriptLine('t-error', 'WebSocket error'); if (!farewellMode) cleanup(); else waitForTtsPlaybackThenCleanup(); };
+      ws.onclose   = () => {
+        if (farewellMode) {
+          waitForTtsPlaybackThenCleanup();
+        } else {
+          if (!stopBtn.disabled) setStatus('', 'Disconnected');
+          cleanup();
+        }
+      };
+
+    } catch (err) {
+      setStatus('error', 'Failed: ' + err.message);
+      addTranscriptLine('t-error', err.message);
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+    }
+  });
+
+  stopBtn.addEventListener('click', () => {
+    cleanup();
+    setStatus('', 'Stopped');
+    startBtn.disabled = false;
+    stopBtn.disabled  = true;
+    drawIdle();
+  });
+
+  async function startMic() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount:     1,
+          sampleRate:       SAMPLE_RATE,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl:  true
+        }
+      });
+
+      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+      await audioCtx.audioWorklet.addModule('/pcm-processor.js');
+
+      // Some browsers ignore the requested 16k and run at hardware rate (often
+      // 48k). The worklet downsamples to SAMPLE_RATE; log what we actually got.
+      if (audioCtx.sampleRate !== SAMPLE_RATE) {
+        console.warn(`[MIC] AudioContext runs at ${audioCtx.sampleRate}Hz, not ${SAMPLE_RATE}Hz — worklet will downsample to ${SAMPLE_RATE}Hz`);
+      } else {
+        console.log(`[MIC] AudioContext at ${audioCtx.sampleRate}Hz`);
+      }
+
+      sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      sourceNode.connect(analyser);
+
+      workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+        processorOptions: {
+          chunkSize:        CHUNK_SIZE,
+          targetSampleRate: SAMPLE_RATE, // worklet downsamples to this if needed
+          energyThreshold:  0.002,   // tune: louder room → raise to 0.004
+          silenceThreshold: 0.0005,
+          speechFrameGate:  3,       // frames before speech_energy fires (~6ms)
+          silenceFrameGate: 20       // frames of quiet before state resets (~40ms)
+        }
+      });
+
+      workletNode.port.onmessage = (e) => {
+        // Diagnostics: confirm the resampling decision the worklet made
+        if (e.data && e.data.type === 'processor_ready') {
+          console.log(`[MIC] Worklet ready: input=${e.data.inputSampleRate}Hz target=${e.data.targetSampleRate}Hz resampling=${e.data.resampling}`);
+          return;
+        }
+
+        // ── INTERRUPT SIGNAL from PCMProcessor ──────────────────────────
+        // This fires BEFORE Sarvam VAD — gives ~200-400ms earlier interrupt.
+        // Only send to server if AI is currently active (TTS playing or LLM running).
+        if (e.data && e.data.type === 'speech_energy_detected') {
+          if (farewellMode || greetingMode) return;
+          // Avoid false barge-in caused by speaker echo immediately after TTS starts.
+          if (Date.now() - lastTtsStartAtMs < 2500) return;
+          if ((ttsPlaying || llmThinking) && ws && ws.readyState === WebSocket.OPEN) {
+            llmThinking = false;
+            stopTtsNow();
+            invalidateTtsSession();
+            micSending = true;
+            ws.send(JSON.stringify({ type: 'client_interrupt' }));
+          }
+          return;
+        }
+
+        if (!micSending) return;
+
+        // PCM audio chunk → send to server for STT
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(e.data.buffer);
+        }
+      };
+
+      sourceNode.connect(workletNode);
+      // Keep the worklet alive without monitoring mic to speakers (prevents feedback/echo).
+      const zeroGain = audioCtx.createGain();
+      zeroGain.gain.value = 0;
+      workletNode.connect(zeroGain);
+      zeroGain.connect(audioCtx.destination);
+
+      setStatus('listening', 'Listening · Speak now');
+      drawWaveform();
+
+    } catch (err) {
+      setStatus('error', 'Mic error: ' + err.message);
+      addTranscriptLine('t-error', 'Mic error: ' + err.message);
+      cleanup();
+      startBtn.disabled = false;
+      stopBtn.disabled  = true;
+    }
+  }
+
+  function cleanup() {
+    farewellMode = false;
+    greetingMode = false;
+    micSending = false;
+    farewellCleanupScheduled = false;
+    stopMicAndWs();
+    if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+    if (ttsAudioCtx) { ttsAudioCtx.close().catch(() => {}); ttsAudioCtx = null; }
+    resetTtsEngine();
+    finalizeAiTurn('');
+  }
+</script>
+</body>
+</html>

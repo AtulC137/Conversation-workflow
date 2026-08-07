@@ -1,6 +1,8 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.js";
 
 export const LOCK_TTL_MS = 2 * 60 * 1000;
+const MAX_LOCK_ACQUIRE_ATTEMPTS = 3;
 
 export function lockExpiresAt(from = Date.now()): Date {
   return new Date(from + LOCK_TTL_MS);
@@ -24,12 +26,14 @@ export type AcquireLockResult =
   | { ok: true; expiresAt: Date }
   | { ok: false; lockedBy: { userId: string; userName: string; expiresAt: Date } };
 
-export async function acquireOrExtendLock(
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+async function acquireOrExtendLockOnce(
   workflowId: string,
   userId: string,
 ): Promise<AcquireLockResult> {
-  await purgeExpiredLocks();
-
   const existing = await prisma.workflowLock.findUnique({
     where: { workflowId },
     include: { user: { select: { id: true, name: true } } },
@@ -68,6 +72,53 @@ export async function acquireOrExtendLock(
     data: { userId, expiresAt, lockedAt: new Date() },
   });
   return { ok: true, expiresAt };
+}
+
+async function readLockConflict(workflowId: string): Promise<AcquireLockResult | null> {
+  const existing = await prisma.workflowLock.findUnique({
+    where: { workflowId },
+    include: { user: { select: { id: true, name: true } } },
+  });
+
+  if (!existing || existing.expiresAt <= new Date()) {
+    return null;
+  }
+
+  return {
+    ok: false,
+    lockedBy: {
+      userId: existing.userId,
+      userName: existing.user.name,
+      expiresAt: existing.expiresAt,
+    },
+  };
+}
+
+export async function acquireOrExtendLock(
+  workflowId: string,
+  userId: string,
+): Promise<AcquireLockResult> {
+  for (let attempt = 0; attempt < MAX_LOCK_ACQUIRE_ATTEMPTS; attempt++) {
+    await purgeExpiredLocks();
+    try {
+      return await acquireOrExtendLockOnce(workflowId, userId);
+    } catch (error) {
+      if (!isUniqueViolation(error) || attempt === MAX_LOCK_ACQUIRE_ATTEMPTS - 1) {
+        const conflict = await readLockConflict(workflowId);
+        if (conflict) {
+          return conflict;
+        }
+        throw error;
+      }
+    }
+  }
+
+  const conflict = await readLockConflict(workflowId);
+  if (conflict) {
+    return conflict;
+  }
+
+  throw new Error(`Failed to acquire workflow lock for ${workflowId}`);
 }
 
 export async function releaseLock(workflowId: string, userId: string): Promise<boolean> {

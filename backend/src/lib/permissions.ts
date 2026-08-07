@@ -87,6 +87,20 @@ export function parsePermissions(raw: unknown, role: OrganizationRole): Permissi
   return base;
 }
 
+export function validatePermissionsMap(raw: unknown): PermissionsMap | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (!(ALL_PERMISSIONS as readonly string[]).includes(key)) return null;
+  }
+  const out = {} as PermissionsMap;
+  for (const key of ALL_PERMISSIONS) {
+    if (typeof obj[key] !== "boolean") return null;
+    out[key] = obj[key];
+  }
+  return out;
+}
+
 export function hasPermission(member: MemberContext, key: PermissionKey): boolean {
   if (member.role === "admin") return true;
   return member.permissions[key] === true;

@@ -93,7 +93,7 @@ export function Sidebar({
           <div className="min-w-0 flex-1 leading-tight">
             <div className="truncate text-sm font-semibold">Susha</div>
             <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground">
-              {organization?.name ?? "Workflow Studio"}
+              {organization?.name ?? "Template Studio"}
             </div>
           </div>
         )}
@@ -120,7 +120,7 @@ export function Sidebar({
           {canCreate && (
             <button
               onClick={onCreate}
-              title="New workflow"
+              title="New template"
               className="rounded-md bg-foreground p-2 text-background transition hover:opacity-90"
             >
               <Plus className="h-4 w-4" />
@@ -151,7 +151,7 @@ export function Sidebar({
               >
                 <span className="flex items-center gap-2">
                   <Plus className="h-4 w-4" />
-                  New Workflow
+                  New Template
                 </span>
                 <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                   ⌘N
@@ -166,7 +166,7 @@ export function Sidebar({
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Search workflows…"
+                placeholder="Search templates…"
                 className="w-full rounded-lg border border-border bg-white pl-8 pr-2 py-2 text-sm outline-none transition focus:border-foreground/40"
               />
             </div>
@@ -187,9 +187,9 @@ export function Sidebar({
               <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                 <Inbox className="h-4 w-4" />
               </div>
-              <p className="text-[12.5px] font-medium text-foreground">No workflows yet</p>
+              <p className="text-[12.5px] font-medium text-foreground">No templates yet</p>
               <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                {canCreate ? "Create your first workflow." : "No workflows available."}
+                {canCreate ? "Upload a prompt to create your first template." : "No templates available."}
               </p>
               {canCreate && (
                 <button
@@ -197,7 +197,7 @@ export function Sidebar({
                   className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border bg-white px-2.5 py-1.5 text-[11.5px] font-medium hover:border-foreground/30"
                 >
                   <Plus className="h-3 w-3" />
-                  New workflow
+                  New template
                 </button>
               )}
             </div>
@@ -254,7 +254,7 @@ export function Sidebar({
                             e.stopPropagation();
                             onDelete(w.id);
                           }}
-                          title="Delete workflow"
+                          title="Delete template"
                           className="mr-1.5 rounded-md p-1.5 text-muted-foreground opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
                         >
                           <Trash2 className="h-3.5 w-3.5" />

@@ -1,14 +1,24 @@
-version: '3.9'
+version: "3.9"
 
 services:
-  lovable-app:
+  flow-ai:
     build: .
-    container_name: lovable-flow-ai
+    container_name: flow-ai
     ports:
       - "8080:8080"
     volumes:
       - .:/app
       - /app/node_modules
     environment:
-      - NODE_ENV=development
+      NODE_ENV: development
+      VOICE_BACKEND_URL: http://voice-backend:8000
+      VITE_API_URL: http://localhost:3001
+      VITE_VOICE_WS_MODE: direct
+      API_URL: http://backend:3001
     restart: unless-stopped
+    networks:
+      - conversation
+
+networks:
+  conversation:
+    name: conversation-net

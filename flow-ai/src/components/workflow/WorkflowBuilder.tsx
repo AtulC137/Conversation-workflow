@@ -33,12 +33,16 @@ import {
 import { toast } from "sonner";
 
 import { SettingsSheet } from "@/components/settings/SettingsSheet";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Sidebar } from "./Sidebar";
 import { TopHeader } from "./TopHeader";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { TestModal } from "./TestModal";
+import { VoiceTestModal, type VoiceTestMode } from "./VoiceTestModal";
+import { TemplateRunner, type RunnerContact } from "./TemplateRunner";
+import { WorkflowGraphView } from "./WorkflowGraphView";
 import { ToolConfigDialog } from "./ToolConfigDialog";
-import { ContextConfigDialog } from "./ContextConfigDialog";
+import { ContextConfigDialog, type ContextSaveValue } from "./ContextConfigDialog";
 import { StartNode } from "./nodes/StartNode";
 import { EndNode } from "./nodes/EndNode";
 import { ConversationNode } from "./nodes/ConversationNode";
@@ -55,19 +59,21 @@ import {
 import { createInitialEdges, createInitialNodes } from "./initialFlow";
 import { ApiError, getAccessToken } from "@/lib/api/client";
 import { createVoiceSession } from "@/lib/api/voice.functions";
+import { buildVoiceMicUiUrl } from "@/lib/voice-mic-url";
 import {
-  acquireWorkflowLock,
-  createWorkflow as createWorkflowApi,
-  deleteWorkflow as deleteWorkflowApi,
-  getWorkflow,
-  listWorkflows,
-  publishWorkflow,
-  releaseWorkflowLock,
-  updateWorkflow,
-  type WorkflowRecord,
-} from "@/lib/api/workflows";
+  acquireTemplateLock,
+  createTemplateFromPrompt,
+  deleteTemplate,
+  getTemplate,
+  listTemplates,
+  publishTemplate,
+  releaseTemplateLock,
+  updateTemplate,
+  type TemplateRecord,
+} from "@/lib/api/templates";
 import { useAuth } from "@/lib/auth/AuthContext";
 import { graphHasQaBlock, workflowToPrompt } from "@/lib/workflow-to-prompt";
+import { resolveContactFields } from "@/lib/contact-fields";
 import { Toaster } from "@/components/ui/sonner";
 import {
   AlertDialog,
@@ -96,11 +102,15 @@ type Workflow = {
   edges: Edge[];
   tools: WorkflowTools;
   context: string;
+  script: string;
+  confirmationQuestion: string;
   status: string;
   updatedAt: number;
   createdByUserId: string;
   createdByName: string;
 };
+
+type MainTab = "run" | "graph";
 
 const marker = { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "#3f3f46" } as const;
 
@@ -110,7 +120,9 @@ function apiToWorkflow(w: {
   nodes: Node<NodeData>[];
   edges: Edge[];
   tools: WorkflowTools;
-  context: string;
+  prompt: string;
+  script?: string;
+  confirmationQuestion?: string;
   status: string;
   updatedAt: number;
   createdBy?: { id: string; name: string };
@@ -121,7 +133,9 @@ function apiToWorkflow(w: {
     nodes: w.nodes,
     edges: w.edges,
     tools: w.tools,
-    context: w.context,
+    context: w.prompt,
+    script: w.script ?? "",
+    confirmationQuestion: w.confirmationQuestion ?? "",
     status: w.status,
     updatedAt: w.updatedAt,
     createdByUserId: w.createdBy?.id ?? "",
@@ -185,14 +199,27 @@ function Inner() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [testOpen, setTestOpen] = useState(false);
+  const [voiceTestOpen, setVoiceTestOpen] = useState(false);
+  const [voiceTestLoading, setVoiceTestLoading] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [toolConfigOpen, setToolConfigOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [creatingNew, setCreatingNew] = useState(false);
   const [clipboard, setClipboard] = useState<BlockClipboard>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hasEditLock, setHasEditLock] = useState(false);
   const [lockedByName, setLockedByName] = useState<string | null>(null);
+  const [campaignId, setCampaignId] = useState<string | null>(null);
+  const [campaignInfo, setCampaignInfo] = useState<{
+    status: string;
+    total: number;
+    succeeded: number;
+    failed: number;
+    lastError?: string | null;
+  } | null>(null);
+  const [runnerContacts, setRunnerContacts] = useState<RunnerContact[]>([]);
+  const [mainTab, setMainTab] = useState<MainTab>("run");
   const hasEditLockRef = useRef(false);
 
   const { fitView, getNode, setCenter } = useReactFlow();
@@ -210,6 +237,7 @@ function Inner() {
 
   const tools = active?.tools ?? defaultWorkflowTools();
   const workflowContext = active?.context ?? "";
+  const workflowConfirmation = active?.confirmationQuestion ?? "";
 
   const isOwnWorkflow = !!active && !!user && active.createdByUserId === user.id;
   const baseCanEditActive =
@@ -231,7 +259,7 @@ function Inner() {
     [activeId],
   );
 
-  const applyServerWorkflow = useCallback((record: WorkflowRecord) => {
+  const applyServerWorkflow = useCallback((record: TemplateRecord) => {
     const wf = apiToWorkflow(record);
     setWorkflows((ws) => ws.map((w) => (w.id === wf.id ? wf : w)));
     return wf;
@@ -253,15 +281,15 @@ function Inner() {
 
     (async () => {
       try {
-        await acquireWorkflowLock(activeId);
+        await acquireTemplateLock(activeId);
         if (cancelled) {
-          await releaseWorkflowLock(activeId).catch(() => {});
+          await releaseTemplateLock(activeId).catch(() => {});
           return;
         }
         setHasEditLock(true);
         setLockedByName(null);
         heartbeat = setInterval(() => {
-          acquireWorkflowLock(activeId).catch(() => {});
+          acquireTemplateLock(activeId).catch(() => {});
         }, 30_000);
       } catch (err) {
         if (err instanceof ApiError && err.status === 423) {
@@ -269,8 +297,8 @@ function Inner() {
           setHasEditLock(false);
           setLockedByName(body.lock?.userName ?? "Another user");
           try {
-            const { workflow } = await getWorkflow(activeId);
-            if (!cancelled) applyServerWorkflow(workflow);
+            const { template } = await getTemplate(activeId);
+            if (!cancelled) applyServerWorkflow(template);
           } catch {
             /* ignore refresh failure */
           }
@@ -284,7 +312,7 @@ function Inner() {
     return () => {
       cancelled = true;
       if (heartbeat) clearInterval(heartbeat);
-      releaseWorkflowLock(activeId).catch(() => {});
+      releaseTemplateLock(activeId).catch(() => {});
       setHasEditLock(false);
     };
   }, [activeId, user?.id, loadingWorkflows, baseCanEditActive, applyServerWorkflow]);
@@ -294,7 +322,7 @@ function Inner() {
       if (!activeId || !hasEditLockRef.current) return;
       const token = getAccessToken();
       const base = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
-      fetch(`${base}/api/workflows/${activeId}/lock`, {
+      fetch(`${base}/api/templates/${activeId}/lock`, {
         method: "DELETE",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         credentials: "include",
@@ -308,27 +336,22 @@ function Inner() {
   useEffect(() => {
     (async () => {
       try {
-        const { workflows: list } = await listWorkflows();
-        if (list.length === 0 && hasPermission("workflows.create")) {
-          const { workflow } = await createWorkflowApi();
-          const wf = apiToWorkflow(workflow);
-          setWorkflows([wf]);
-          setActiveId(wf.id);
-        } else if (list.length === 0) {
+        const { templates: list } = await listTemplates();
+        if (list.length === 0) {
           setWorkflows([]);
           setActiveId(null);
         } else {
           const loaded = await Promise.all(
             list.map(async (s) => {
-              const { workflow } = await getWorkflow(s.id);
-              return apiToWorkflow(workflow);
+              const { template } = await getTemplate(s.id);
+              return apiToWorkflow(template);
             }),
           );
           setWorkflows(loaded);
           setActiveId(loaded[0]?.id ?? null);
         }
       } catch (err) {
-        toast.error("Failed to load workflows", {
+        toast.error("Failed to load templates", {
           description: err instanceof Error ? err.message : "Could not reach API",
         });
       } finally {
@@ -344,37 +367,29 @@ function Inner() {
     const timer = setTimeout(async () => {
       setSaving(true);
       try {
-        const { workflow } = await updateWorkflow(active.id, {
+        const { template } = await updateTemplate(active.id, {
           name: active.name,
-          context: active.context,
+          prompt: active.context,
+          confirmationQuestion: active.confirmationQuestion,
+          script: active.script,
           tools: active.tools,
           nodes: active.nodes,
           edges: active.edges,
           expectedUpdatedAt: serverUpdatedAt,
         });
-        setWorkflows((ws) =>
-          ws.map((w) =>
-            w.id === workflow.id
-              ? {
-                  ...w,
-                  updatedAt: workflow.updatedAt,
-                  status: workflow.status,
-                }
-              : w,
-          ),
-        );
+        applyServerWorkflow(template);
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
-          const body = err.body as { workflow?: WorkflowRecord };
-          if (body.workflow) {
-            applyServerWorkflow(body.workflow);
+          const body = err.body as { template?: TemplateRecord };
+          if (body.template) {
+            applyServerWorkflow(body.template);
           }
-          toast.error("Workflow was modified by another user", {
+          toast.error("Template was modified by another user", {
             description: "Your changes were discarded. Reloaded the latest version.",
           });
         } else {
           toast.error("Auto-save failed", {
-            description: err instanceof Error ? err.message : "Could not save workflow",
+            description: err instanceof Error ? err.message : "Could not save template",
           });
         }
       } finally {
@@ -387,6 +402,8 @@ function Inner() {
     active?.id,
     active?.name,
     active?.context,
+    active?.confirmationQuestion,
+    active?.script,
     active?.tools,
     active?.nodes,
     active?.edges,
@@ -521,25 +538,12 @@ function Inner() {
 
   const createWorkflow = useCallback(async () => {
     if (!canCreateWorkflow) {
-      toast.error("You do not have permission to create workflows");
+      toast.error("You do not have permission to create templates");
       return;
     }
-    try {
-      const { workflow } = await createWorkflowApi({
-        name: `Workflow ${workflows.length + 1}`,
-      });
-      const wf = apiToWorkflow(workflow);
-      setWorkflows((ws) => [wf, ...ws]);
-      setActiveId(wf.id);
-      setSelectedId(null);
-      setSelectedEdgeId(null);
-      setTimeout(() => fitView({ padding: 0.35, duration: 250 }), 50);
-    } catch (err) {
-      toast.error("Failed to create workflow", {
-        description: err instanceof Error ? err.message : "Could not create workflow",
-      });
-    }
-  }, [workflows.length, fitView]);
+    setCreatingNew(true);
+    setContextOpen(true);
+  }, [canCreateWorkflow]);
 
   const selectWorkflow = useCallback((id: string) => {
     setActiveId(id);
@@ -693,11 +697,46 @@ function Inner() {
   );
 
   const handleSaveContext = useCallback(
-    (value: string) => {
-      updateActive((w) => ({ ...w, context: value }));
-      setContextOpen(false);
+    async ({ prompt, confirmationQuestion }: ContextSaveValue) => {
+      if (!prompt.trim()) {
+        setContextOpen(false);
+        setCreatingNew(false);
+        return;
+      }
+      try {
+        if (active && canEditActive && !creatingNew) {
+          const { template } = await updateTemplate(active.id, {
+            prompt: prompt.trim(),
+            confirmationQuestion: confirmationQuestion.trim(),
+            expectedUpdatedAt: active.updatedAt,
+          });
+          applyServerWorkflow(template);
+          setContextOpen(false);
+          toast.success("Call info updated");
+          return;
+        }
+
+        const { template } = await createTemplateFromPrompt({
+          name: `Template ${workflows.length + 1}`,
+          prompt: prompt.trim(),
+          confirmationQuestion: confirmationQuestion.trim(),
+        });
+        const wf = apiToWorkflow(template);
+        setWorkflows((ws) => [wf, ...ws]);
+        setActiveId(wf.id);
+        setSelectedId(null);
+        setSelectedEdgeId(null);
+        setMainTab("run");
+        setCreatingNew(false);
+        setContextOpen(false);
+        toast.success("Template created");
+      } catch (err) {
+        toast.error("Failed to save prompt", {
+          description: err instanceof Error ? err.message : "Could not save",
+        });
+      }
     },
-    [updateActive],
+    [active, canEditActive, workflows.length, applyServerWorkflow, creatingNew],
   );
 
   const handleTest = useCallback(async () => {
@@ -710,47 +749,76 @@ function Inner() {
 
     if (tools.voice.enabled) {
       if (graphHasQaBlock(nodes) && !workflowContext.trim()) {
-        toast.error("Add workflow Context for Q&A", {
-          description: "Open Context in the header and add facts the agent can answer from.",
+          toast.error("Add prompt for Q&A", {
+            description: "Open Prompt in the header and add the prompt the agent should follow.",
         });
         return;
       }
+      setVoiceTestOpen(true);
+      return;
+    }
+
+    setTestOpen(true);
+  }, [tools, nodes, edges, workflowContext]);
+
+  const handleVoiceTest = useCallback(
+    async (
+      mode: VoiceTestMode,
+      phoneNumber?: string,
+      contactFields?: Record<string, string>,
+    ) => {
       try {
         const token = getAccessToken();
         if (!token) {
           toast.error("Not signed in");
           return;
         }
+        setVoiceTestLoading(true);
         const config = workflowToPrompt(nodes, edges, workflowContext);
+        const fields = resolveContactFields(runnerContacts, phoneNumber, contactFields);
         const { sessionId } = await createVoiceSession({
-          data: { ...config, workflowId: active?.id, accessToken: token },
+          data: {
+            ...config,
+            workflowId: active?.id,
+            accessToken: token,
+            testMode: mode,
+            phoneNumber: mode === "phone" ? phoneNumber : undefined,
+            contactFields: fields,
+          },
         });
-        const voiceUiUrl = import.meta.env.VITE_VOICE_UI_URL ?? "http://localhost:3000";
-        window.open(`${voiceUiUrl}/?session=${sessionId}`, "_blank");
+        setVoiceTestOpen(false);
+        if (mode === "browser") {
+          window.open(buildVoiceMicUiUrl(sessionId), "_blank");
+          toast.success("Voice test opened in browser");
+        } else {
+          toast.success(`Calling ${phoneNumber}…`, {
+            description: "Answer your phone to talk to the agent.",
+          });
+        }
       } catch (err) {
         toast.error("Failed to start voice test", {
           description: err instanceof Error ? err.message : "Could not create voice session",
         });
+      } finally {
+        setVoiceTestLoading(false);
       }
-      return;
-    }
-
-    setTestOpen(true);
-  }, [tools, nodes, edges, workflowContext, active?.id]);
+    },
+    [nodes, edges, workflowContext, active?.id, runnerContacts],
+  );
 
   const handlePublish = useCallback(async () => {
     if (!active) return;
     try {
-      const { version } = await publishWorkflow(active.id);
+      const { version } = await publishTemplate(active.id);
       setWorkflows((ws) =>
         ws.map((w) => (w.id === active.id ? { ...w, status: "published" } : w)),
       );
-      toast.success("Workflow published", {
+      toast.success("Template published", {
         description: `Version ${version.versionNumber} is live.`,
       });
     } catch (err) {
       toast.error("Publish failed", {
-        description: err instanceof Error ? err.message : "Could not publish workflow",
+        description: err instanceof Error ? err.message : "Could not publish template",
       });
     }
   }, [active]);
@@ -782,7 +850,7 @@ function Inner() {
     if (pendingDelete.kind === "workflow") {
       const deletedId = pendingDelete.id;
       try {
-        await deleteWorkflowApi(deletedId);
+        await deleteTemplate(deletedId);
         const remaining = workflows.filter((w) => w.id !== deletedId);
         setWorkflows(remaining);
         if (activeId === deletedId) {
@@ -791,8 +859,8 @@ function Inner() {
           setSelectedEdgeId(null);
         }
       } catch (err) {
-        toast.error("Failed to delete workflow", {
-          description: err instanceof Error ? err.message : "Could not delete workflow",
+        toast.error("Failed to delete template", {
+          description: err instanceof Error ? err.message : "Could not delete template",
         });
         setPendingDelete(null);
         return;
@@ -852,10 +920,103 @@ function Inner() {
 
   const toolConfigInitialValue = tools.whatsapp.phoneNumber;
 
+  const uploadExcel = useCallback(async (file: File) => {
+    const token = getAccessToken();
+    if (!token) throw new Error("Not signed in");
+    const base = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${base}/api/campaigns/parse-excel`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `Excel parse failed (${res.status})`);
+    }
+    return (await res.json()) as { contacts: RunnerContact[] };
+  }, []);
+
+  const startBulkCalls = useCallback(
+    async (contacts: RunnerContact[]) => {
+      if (!contacts.length) return;
+      if (!active) throw new Error("No template selected");
+
+      const token = getAccessToken();
+      if (!token) throw new Error("Not signed in");
+
+      const sessionConfig = workflowToPrompt(nodes, edges, workflowContext);
+
+      const base = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+      const res = await fetch(`${base}/api/campaigns/start`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          templateId: active.id,
+          contacts,
+          sessionConfig,
+        }),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Campaign start failed (${res.status})`);
+      }
+      const json = (await res.json()) as { campaignId: string };
+      setCampaignId(json.campaignId);
+    },
+    [active, nodes, edges, workflowContext],
+  );
+
+  useEffect(() => {
+    if (!campaignId) {
+      setCampaignInfo(null);
+      return;
+    }
+    const token = getAccessToken();
+    if (!token) return;
+
+    const base = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`${base}/api/campaigns/${campaignId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: "include",
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { campaign: any };
+        if (cancelled) return;
+        setCampaignInfo({
+          status: body.campaign.status,
+          total: body.campaign.total,
+          succeeded: body.campaign.succeeded,
+          failed: body.campaign.failed,
+          lastError: body.campaign.lastError ?? null,
+        });
+        if (body.campaign.status === "completed" || body.campaign.status === "failed") {
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!cancelled) setTimeout(tick, 1500);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId]);
+
   if (loadingWorkflows) {
     return (
       <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        Loading workflows…
+        Loading templates…
       </div>
     );
   }
@@ -886,7 +1047,7 @@ function Inner() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <TopHeader
-          title={active?.name ?? "No workflow selected"}
+          title={active?.name ?? "No template selected"}
           status={active?.status ?? "draft"}
           canEdit={canEditActive}
           canTest={canTestActive}
@@ -899,114 +1060,79 @@ function Inner() {
           onTest={handleTest}
           onPublish={handlePublish}
           onLogout={handleLogout}
-          onOpenContext={() => setContextOpen(true)}
+          onOpenContext={() => {
+            setCreatingNew(false);
+            setContextOpen(true);
+          }}
           onToggleTool={handleToggleTool}
           onConfigureTool={handleConfigureTool}
         />
 
-        <div className="relative flex min-h-0 flex-1">
-          <div className="relative flex-1">
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {active && (
+            <div className="flex shrink-0 gap-1 border-b border-border px-4 py-2">
+              {(
+                [
+                  ["run", "Run"],
+                  ["graph", "Graph"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setMainTab(id)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    mainTab === id
+                      ? "bg-foreground text-background"
+                      : "text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="relative min-h-0 flex-1">
             {!active ? (
               <EmptyCanvas onCreate={createWorkflow} />
-            ) : (
-              <>
-                <ReactFlow
-                  nodes={decoratedNodes}
-                  edges={decoratedEdges}
-                  onNodesChange={onNodesChange}
-                  onEdgesChange={onEdgesChange}
-                  onConnect={onConnect}
-                  onNodeClick={onNodeClick}
-                  onEdgeClick={(_, edge) => {
-                    setSelectedEdgeId(edge.id);
-                    setSelectedId(null);
-                  }}
-                  onSelectionChange={onSelectionChange}
-                  onPaneClick={() => {
-                    setSelectedId(null);
-                    setSelectedEdgeId(null);
-                  }}
-                  nodeTypes={nodeTypes}
-                  fitView
-                  fitViewOptions={{ padding: 0.35 }}
-                  proOptions={{ hideAttribution: true }}
-                  deleteKeyCode={null}
-                  defaultEdgeOptions={{ type: "smoothstep", markerEnd: marker }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Delete" || e.key === "Backspace") {
-                      if (isTypingTarget(e.target)) return;
-                      requestDeleteSelected();
-                    }
-                  }}
-                  tabIndex={0}
-                >
-                  <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color="#d4d4d8" />
-                  <Controls position="bottom-left" showInteractive={false} />
-                  <MiniMap
-                    position="bottom-right"
-                    pannable
-                    zoomable
-                    maskColor="rgba(244,244,245,0.6)"
-                    nodeColor={(n) => {
-                      if (n.type === "start") return "#18181b";
-                      if (n.type === "end") return "#a1a1aa";
-                      if (n.type === "qa") return "#ede9fe";
-                      if (n.type === "userInput") return "#fef3c7";
-                      if (n.type === "react") return "#e0f2fe";
-                      return "#ffffff";
-                    }}
-                    nodeStrokeColor="#27272a"
-                    nodeStrokeWidth={1}
-                  />
-                </ReactFlow>
-
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="pointer-events-none absolute left-4 top-4 flex gap-2"
-                >
-                  <Stat label="Nodes" value={nodes.length} />
-                  <Stat label="Edges" value={edges.length} />
-                  <Stat label="Branches" value={countBranches(nodes)} />
-                </motion.div>
-
-                <BlockPalette
-                  onAddConversation={addConversationNode}
-                  onAddUserInput={addUserInputNode}
-                  onAddReact={addReactNode}
-                  onAddQa={addQaNode}
-                  onAddEnd={addEndNode}
-                />
-
-                <CanvasActions
-                  canCopy={!!selectedNode && selectedNode.type !== "start"}
-                  canPaste={!!clipboard}
-                  canDeleteBlock={!!selectedId && selectedNode?.type !== "start"}
-                  canDeleteEdge={!!selectedEdgeId}
-                  onCopy={copySelectedBlock}
-                  onPaste={pasteBlock}
-                  onDelete={requestDeleteSelected}
-                />
-              </>
-            )}
-          </div>
-
-          <AnimatePresence mode="wait">
-            {selectedNode && (
-              <PropertiesPanel
-                key={selectedNode.id}
-                node={selectedNode}
+            ) : mainTab === "graph" ? (
+              <WorkflowGraphView
+                nodes={decoratedNodes}
+                edges={decoratedEdges}
                 readOnly={!canEditActive}
-                onChange={(data) => updateNodeData(selectedNode.id, () => data)}
-                onClose={() => setSelectedId(null)}
-                onDelete={
-                  !canEditActive || selectedNode.type === "start"
-                    ? undefined
-                    : () => setPendingDelete({ kind: "node", id: selectedNode.id })
-                }
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={onConnect}
+              />
+            ) : (
+              <TemplateRunner
+                templateName={active.name}
+                systemPrompt={workflowContext}
+                confirmationQuestion={workflowConfirmation}
+                canEditPrompt={canEditActive}
+                onEditPrompt={() => {
+                  setCreatingNew(false);
+                  setContextOpen(true);
+                }}
+                onBrowserTest={() => {
+                  const fields = resolveContactFields(runnerContacts);
+                  if (!fields || !Object.keys(fields).length) {
+                    toast.error("Upload Excel first", {
+                      description: "Browser test needs a contact row (name, phone, …).",
+                    });
+                    return;
+                  }
+                  void handleVoiceTest("browser", undefined, fields);
+                }}
+                onCallPhone={(phone, fields) => handleVoiceTest("phone", phone, fields)}
+                onUploadExcel={uploadExcel}
+                onStartBulkCalls={startBulkCalls}
+                onContactsChange={setRunnerContacts}
+                campaignInfo={campaignInfo}
               />
             )}
-          </AnimatePresence>
+          </div>
         </div>
       </div>
 
@@ -1018,10 +1144,21 @@ function Inner() {
         onClose={() => setTestOpen(false)}
       />
 
+      <VoiceTestModal
+        open={voiceTestOpen}
+        loading={voiceTestLoading}
+        onClose={() => setVoiceTestOpen(false)}
+        onTest={handleVoiceTest}
+      />
+
       <ContextConfigDialog
         open={contextOpen}
-        initialValue={workflowContext}
-        onClose={() => setContextOpen(false)}
+        initialValue={creatingNew ? "" : workflowContext}
+        initialConfirmation={creatingNew ? "" : workflowConfirmation}
+        onClose={() => {
+          setContextOpen(false);
+          setCreatingNew(false);
+        }}
         onSave={handleSaveContext}
       />
 
@@ -1037,14 +1174,14 @@ function Inner() {
           <AlertDialogHeader>
             <AlertDialogTitle>
               {pendingDelete?.kind === "workflow"
-                ? "Delete workflow?"
+                ? "Delete template?"
                 : pendingDelete?.kind === "edge"
                   ? "Delete connection?"
                   : "Delete block?"}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingDelete?.kind === "workflow"
-                ? "This workflow and all its blocks will be removed. This action cannot be undone."
+                ? "This template and all its blocks will be removed. This action cannot be undone."
                 : pendingDelete?.kind === "edge"
                   ? "This connection will be removed from the workflow."
                   : "This block and any connections to it will be removed. This action cannot be undone."}
@@ -1140,16 +1277,16 @@ function EmptyCanvas({ onCreate }: { onCreate: () => void }) {
         <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-foreground text-background">
           <Plus className="h-5 w-5" />
         </div>
-        <h3 className="text-base font-semibold">No workflow selected</h3>
+        <h3 className="text-base font-semibold">No template selected</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Create your first workflow to start designing a conversation.
+          Upload a prompt to generate your first template.
         </p>
         <button
           onClick={onCreate}
           className="mt-5 inline-flex items-center gap-2 rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background hover:opacity-90"
         >
           <Plus className="h-4 w-4" />
-          New Workflow
+          New Template
         </button>
       </div>
     </div>
@@ -1169,40 +1306,84 @@ function BlockPalette({
   onAddQa: () => void;
   onAddEnd: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleEnter = () => {
+    if (collapseTimer.current) {
+      clearTimeout(collapseTimer.current);
+      collapseTimer.current = null;
+    }
+    setExpanded(true);
+  };
+
+  const handleLeave = () => {
+    collapseTimer.current = setTimeout(() => setExpanded(false), 150);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (collapseTimer.current) clearTimeout(collapseTimer.current);
+    };
+  }, []);
+
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      className="absolute left-4 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-1.5 rounded-2xl border border-border bg-white/95 p-1.5 shadow-[0_4px_18px_-8px_rgba(0,0,0,0.15)] backdrop-blur"
-    >
-      <PaletteButton icon={MessageSquareText} label="Conversation" onClick={onAddConversation} />
-      <PaletteButton icon={FileText} label="LLM" onClick={onAddUserInput} />
-      <PaletteButton icon={Sparkles} label="React" onClick={onAddReact} />
-      <PaletteButton icon={HelpCircle} label="Q&A" onClick={onAddQa} />
-      <div className="my-0.5 h-px bg-border" />
-      <PaletteButton icon={Square} label="End" onClick={onAddEnd} />
-    </motion.div>
+    <TooltipProvider delayDuration={200}>
+      <motion.div
+        initial={{ opacity: 0, x: -8 }}
+        animate={{ opacity: 1, x: 0, width: expanded ? "auto" : 40 }}
+        transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        className="absolute left-4 top-1/2 z-10 flex -translate-y-1/2 flex-col gap-1.5 overflow-hidden rounded-2xl border border-border bg-white/95 p-1.5 shadow-[0_4px_18px_-8px_rgba(0,0,0,0.15)] backdrop-blur"
+      >
+        <PaletteButton
+          icon={MessageSquareText}
+          label="Conversation"
+          expanded={expanded}
+          onClick={onAddConversation}
+        />
+        <PaletteButton icon={FileText} label="LLM" expanded={expanded} onClick={onAddUserInput} />
+        <PaletteButton icon={Sparkles} label="React" expanded={expanded} onClick={onAddReact} />
+        <PaletteButton icon={HelpCircle} label="Q&A" expanded={expanded} onClick={onAddQa} />
+        <div className="my-0.5 h-px bg-border" />
+        <PaletteButton icon={Square} label="End" expanded={expanded} onClick={onAddEnd} />
+      </motion.div>
+    </TooltipProvider>
   );
 }
 
 function PaletteButton({
   icon: Icon,
   label,
+  expanded,
   onClick,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
+  expanded: boolean;
   onClick: () => void;
 }) {
-  return (
+  const button = (
     <button
       onClick={onClick}
       title={label}
-      className="group flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] font-medium text-foreground transition hover:bg-foreground hover:text-background"
+      className={`group flex items-center rounded-lg text-left text-[12px] font-medium text-foreground transition hover:bg-foreground hover:text-background ${
+        expanded ? "gap-2 px-2 py-1.5" : "justify-center p-2"
+      }`}
     >
-      <Icon className="h-3.5 w-3.5" />
-      <span className="pr-1">{label}</span>
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      {expanded && <span className="pr-1 whitespace-nowrap">{label}</span>}
     </button>
+  );
+
+  if (expanded) return button;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

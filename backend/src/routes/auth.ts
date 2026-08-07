@@ -212,16 +212,12 @@ authRouter.post("/refresh", async (req, res) => {
   }
 
   const hash = hashRefreshToken(raw);
-  const session = await prisma.authSession.findFirst({
-    where: {
-      refreshTokenHash: hash,
-      revokedAt: null,
-      expiresAt: { gt: new Date() },
-    },
+  const session = await prisma.authSession.findUnique({
+    where: { refreshTokenHash: hash },
     include: { user: true },
   });
 
-  if (!session) {
+  if (!session || session.revokedAt !== null || session.expiresAt <= new Date()) {
     res.status(401).json({ error: "Invalid refresh token" });
     return;
   }

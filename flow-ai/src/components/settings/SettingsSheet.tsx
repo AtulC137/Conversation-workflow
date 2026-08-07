@@ -54,6 +54,10 @@ export function SettingsSheet({ open, onOpenChange }: Props) {
       toast.error("Enter current and new password");
       return;
     }
+    if (newPassword.length < 8) {
+      toast.error("New password must be at least 8 characters");
+      return;
+    }
     setChangingPassword(true);
     try {
       await changePassword(currentPassword, newPassword);

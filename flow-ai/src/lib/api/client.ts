@@ -80,11 +80,27 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    const message = typeof err.error === "string" ? err.error : "Request failed";
-    throw new ApiError(message, res.status, err);
+    throw new ApiError(formatApiError(err), res.status, err);
   }
 
   return res.json() as Promise<T>;
+}
+
+function formatApiError(body: unknown): string {
+  if (!body || typeof body !== "object" || !("error" in body)) {
+    return "Request failed";
+  }
+  const { error } = body as { error: unknown };
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const flat = error as { formErrors?: string[]; fieldErrors?: Record<string, string[]> };
+    const parts = [
+      ...(flat.formErrors ?? []),
+      ...Object.values(flat.fieldErrors ?? {}).flat(),
+    ].filter(Boolean);
+    if (parts.length) return parts.join(". ");
+  }
+  return "Request failed";
 }
 
 export class ApiError extends Error {

@@ -189,6 +189,7 @@ workflowsRouter.post("/", requirePermission("workflows.create"), async (req: Aut
       organizationId: req.user!.organizationId,
       name: data.name ?? "Untitled workflow",
       context: data.context ?? "",
+      script: "",
       tools: asJson(data.tools ?? defaultTools),
       nodes: asJson(data.nodes ?? defaultNodes),
       edges: asJson(data.edges ?? []),

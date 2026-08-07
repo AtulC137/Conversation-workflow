@@ -578,6 +578,8 @@ export function serializeWorkflowGraph(
 
         message: n.data.message,
 
+        waitForResponse: n.data.waitForResponse,
+
         silenceTimeoutSec: n.data.silenceTimeoutSec,
 
         responses: (n.data.responses ?? []).map((r) => ({

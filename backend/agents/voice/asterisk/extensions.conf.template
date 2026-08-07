@@ -1,0 +1,25 @@
+[general]
+static=yes
+writeprotect=no
+clearglobalvars=no
+
+[globals]
+AUDIOSOCKET_PEER=${SIP_AUDIOSOCKET_PEER}
+AUDIOSOCKET_PORT=${SIP_AUDIOSOCKET_PORT}
+VOICE_BACKEND_URL=${VOICE_BACKEND_URL}
+
+[from-frejun]
+; Inbound PSTN calls from FreJun SIP trunk
+exten => _X.,1,NoOp(Inbound FreJun call to ${EXTEN})
+ same => n,Set(CALLED_DID=${EXTEN})
+ same => n,AGI(inbound_resolve.py)
+ same => n,GotoIf($["${SESSION_ID}" = ""]?hangup,1)
+ same => n,AudioSocket(${SESSION_ID},${AUDIOSOCKET_PEER}:${AUDIOSOCKET_PORT})
+ same => n(hangup),Hangup()
+
+[outbound-ai]
+; Runs on the answered PJSIP outbound channel (AMI Context/Exten)
+exten => connect,1,NoOp(Outbound AI connected session=${SESSION_ID})
+ same => n,Log(NOTICE, outbound-ai AudioSocket SESSION_ID=${SESSION_ID})
+ same => n,AudioSocket(${SESSION_ID},${AUDIOSOCKET_PEER}:${AUDIOSOCKET_PORT})
+ same => n,Hangup()

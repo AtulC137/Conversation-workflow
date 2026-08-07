@@ -8,7 +8,6 @@ import {
   Rocket,
   ChevronDown,
   Phone,
-  MessageCircle,
   Pencil,
   BookOpen,
 } from "lucide-react";
@@ -109,7 +108,7 @@ export function TopHeader({
               : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/30 hover:text-foreground"
           }`}
         >
-          <BookOpen className="h-3 w-3" /> Context
+          <BookOpen className="h-3 w-3" /> Call info
         </button>
         <ToolToggle
           icon={Phone}
@@ -117,14 +116,6 @@ export function TopHeader({
           enabled={tools.voice.enabled}
           disabled={!canEdit}
           onToggle={() => onToggleTool("voice")}
-        />
-        <ToolToggle
-          icon={MessageCircle}
-          label="WhatsApp"
-          enabled={tools.whatsapp.enabled}
-          disabled={!canEdit}
-          onToggle={() => onToggleTool("whatsapp")}
-          onConfigure={() => onConfigureTool("whatsapp")}
         />
       </div>
 
@@ -146,7 +137,7 @@ export function TopHeader({
         disabled={!canTest}
         className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-foreground/30 hover:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <Play className="h-3.5 w-3.5" /> Test Workflow
+        <Play className="h-3.5 w-3.5" /> Test Template
       </button>
       <button
         onClick={onPublish}
